@@ -1,0 +1,42 @@
+{
+	"schemaVersion": 1,
+	"id": "rhythm_axe_mod",
+	"version": "${version}",
+	"name": "Rhythm Axe Mod",
+	"description": "节奏小斧数据包伴侣 Mod：增强 /tick rate 指令（支持 BPM/ms/t 格式），降低权限等级为2，同步客户端渲染速率，禁用 run_command 确认弹窗",
+	"authors": [
+		"一只那起的核弹"
+	],
+	"contributors": [
+		"GitHub Copilot",
+		"Deepseek V4"
+	],
+	"contact": {
+		"homepage": "https://space.bilibili.com/39980832",
+		"sources": "https://github.com/FabricMC/fabric-example-mod"
+	},
+	"license": "CC0-1.0",
+	"icon": "assets/rhythm_axe_mod/icon.jpg",
+	"environment": "*",
+	"entrypoints": {
+		"main": [
+			"name.rhythm_axe_mod.RhythmAxeMod"
+		],
+		"client": [
+			"name.rhythm_axe_mod.client.RhythmAxeModClient"
+		]
+	},
+	"mixins": [
+		"rhythm_axe_mod.mixins.json",
+		{
+			"config": "rhythm_axe_mod.client.mixins.json",
+			"environment": "client"
+		}
+	],
+	"depends": {
+		"fabricloader": ">=0.19.2",
+		"minecraft": "~26.1.2",
+		"java": ">=25",
+		"fabric-api": "*"
+	}
+}

@@ -1,0 +1,17 @@
+{
+	"required": true,
+	"package": "name.rhythm_axe_mod.client.mixin",
+	"compatibilityLevel": "JAVA_25",
+	"client": [
+		"DeltaTrackerTimerMixin",
+		"MinecraftClientMixin",
+		"ClickEventConfirmBypassMixin",
+		"SoundManagerMixin"
+	],
+	"injectors": {
+		"defaultRequire": 1
+	},
+	"overwrites": {
+		"requireAnnotations": true
+	}
+}

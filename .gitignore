@@ -1,0 +1,59 @@
+# gradle
+
+.gradle/
+build/
+out/
+classes/
+
+# eclipse
+
+*.launch
+
+# idea
+
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# vscode
+
+.settings/
+.vscode/
+bin/
+.classpath
+.project
+
+# macos
+
+*.DS_Store
+
+# fabric
+
+run/
+
+# java
+
+hs_err_*.log
+replay_*.log
+*.hprof
+*.jfr
+
+# python (dev tools)
+
+.venv/
+__pycache__/
+*.pyc
+
+# decompiled minecraft source (dev environment output)
+
+net/
+
+# local debug / scratch files
+
+build_err*.txt
+build_out*.txt
+err.txt
+runTick.txt
+build.log
+compile_sel.log

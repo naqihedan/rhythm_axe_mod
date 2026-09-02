@@ -1,0 +1,15 @@
+{
+	"required": true,
+	"package": "name.rhythm_axe_mod.mixin",
+	"compatibilityLevel": "JAVA_25",
+	"mixins": [
+		"TickCommandMixin",
+		"MinecraftServerAccessor"
+	],
+	"injectors": {
+		"defaultRequire": 1
+	},
+	"overwrites": {
+		"requireAnnotations": true
+	}
+}
