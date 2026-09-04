@@ -191,11 +191,11 @@ public final class TimelineGui implements HudElement {
 		String right = String.format("%.2fx %d流速", d.playSpeed(), d.noteSpeed())
 				+ "  " + d.playhead() + "/"
 				+ (d.hasEndTime() ? Integer.toString(d.endTime()) : "?");
-		// 状态栏左：未保存编辑数（标题左侧）+ 曲名-歌手
+		// 状态栏左：曲名-歌手（最左）+ 未保存编辑数（标题右侧）
 		String unsavedText = d.unsavedCount() + "个未保存的编辑";
-		int unsavedW = font.width(unsavedText);
-		graphics.text(font, unsavedText, x1 + 2, top + 1, withAlpha(0xFFFFFFB0, alpha));
-		graphics.text(font, left, x1 + 2 + unsavedW + 6, top + 1, withAlpha(0xFFFFFFFF, alpha));
+		int leftW = font.width(left);
+		graphics.text(font, left, x1 + 2, top + 1, withAlpha(0xFFFFFFFF, alpha));
+		graphics.text(font, unsavedText, x1 + 2 + leftW + 6, top + 1, withAlpha(0xFFFFFFB0, alpha));
 		int midW = font.width(mid);
 		graphics.text(font, mid, x1 + (x2 - x1) / 2 - midW / 2, top + 1, withAlpha(0xFFFFFFC0, alpha));
 		int rightW = font.width(right);
@@ -268,8 +268,9 @@ public final class TimelineGui implements HudElement {
 		Map<Integer, Map<Integer, Integer>> perType = new HashMap<>();
 		for (NoteEntry n : d.notes()) {
 			int t0 = n.time();
-			// 混凝土(3) 覆盖 [time, time+duration) 的每一格（持续 duration 刻），其余仅占 time 一格
-			int t1 = (n.type() == 3) ? n.time() + n.duration() - 1 : n.time();
+			// 混凝土(3) 覆盖 [time, time+duration) 的每一格（持续 duration 刻），其余仅占 time 一格；
+			// duration=0 也计入 time 一格，便于同一刻度重合的多个零时长混凝土显示数量角标
+			int t1 = (n.type() == 3) ? Math.max(n.time(), n.time() + n.duration() - 1) : n.time();
 			Map<Integer, Integer> m = perType.computeIfAbsent(n.type(), k -> new HashMap<>());
 			for (int t = t0; t <= t1; t++) {
 				m.merge(t, 1, Integer::sum);
@@ -334,7 +335,10 @@ public final class TimelineGui implements HudElement {
 		if (n.type() == 3) { // 混凝土：长条，显示 [time, time+duration) 与窗口的交集，头出窗口也画可见部分
 			Block b = concreteBlock(n.color());
 			float x0 = x1 + (n.time() - start) * pxPerTick;
-			float xEnd = x0 + n.duration() * pxPerTick;
+			// 最终宽度：持续时长>0 时最后一刻只显示半格（宽 = duration - 0.5 格），让长条尾部收窄；
+			// 时长=0 时显示四分之一格（此前 xEnd=x0，宽度为 0 被过滤，导致不显示）
+			float durW = n.duration() > 0 ? (n.duration() - 0.5f) : 0.25f;
+			float xEnd = x0 + durW * pxPerTick;
 			float visL = Math.max(x0, x1);
 			float visR = Math.min(xEnd, x2);
 			if (visR - visL >= 1f) {
