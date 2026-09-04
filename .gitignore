@@ -57,3 +57,7 @@ err.txt
 runTick.txt
 build.log
 compile_sel.log
+
+# local dev tools (not for publishing)
+dev_client.ps1
+scripts/
