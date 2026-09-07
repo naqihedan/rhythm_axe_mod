@@ -192,7 +192,7 @@ public final class TimelineGui implements HudElement {
 				+ "  " + d.playhead() + "/"
 				+ (d.hasEndTime() ? Integer.toString(d.endTime()) : "?");
 		// 状态栏左：曲名-歌手（最左）+ 未保存编辑数（标题右侧）
-		String unsavedText = d.unsavedCount() + "个未保存的编辑";
+		String unsavedText = d.unsavedCount() + (d.unsavedCapped() ? "+" : "") + "个未保存的编辑";
 		int leftW = font.width(left);
 		graphics.text(font, left, x1 + 2, top + 1, withAlpha(0xFFFFFFFF, alpha));
 		graphics.text(font, unsavedText, x1 + 2 + leftW + 6, top + 1, withAlpha(0xFFFFFFB0, alpha));
@@ -343,9 +343,9 @@ public final class TimelineGui implements HudElement {
 			float visR = Math.min(xEnd, x2);
 			if (visR - visL >= 1f) {
 				int dw = (int) (visR - visL);
-				drawBlock(g, b, (int) visL, yTop, dw, grid - 2);
+				drawBlock(g, b, (int) visL, yTop, dw, grid - 1);
 				if (n.selected()) {
-					outlineSelection(g, (int) visL, yTop, dw, grid - 2, alpha);
+					outlineSelection(g, (int) visL, yTop, dw, grid - 1, alpha);
 				}
 			}
 			return;
@@ -357,9 +357,9 @@ public final class TimelineGui implements HudElement {
 		Block block = (n.type() == 4) ? glassBlock(n.color()) : noteBlock(n.type());
 		if (block != null) {
 			int nw = (x + grid > x2) ? (x2 - x) : grid;
-			drawBlock(g, block, x, yTop, nw, grid - 2);
+			drawBlock(g, block, x, yTop, nw, grid - 1);
 			if (n.selected()) {
-				outlineSelection(g, x, yTop, nw, grid - 2, alpha);
+				outlineSelection(g, x, yTop, nw, grid - 1, alpha);
 			}
 		}
 		// 引导线（引导线连接）画下边缘亮条作提示

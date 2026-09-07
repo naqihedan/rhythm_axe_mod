@@ -101,6 +101,10 @@ public final class TimelineSync {
 				float playSpeed = f(editor, "play_speed", 1.0f);
 				int noteSpeed = readNoteSpeed(server);
 				int unsaved = Math.abs(cursor - editor.getIntOr("saved_cursor", 0));
+				// 未保存编辑数显示上限：达历史上限-1 时记为(上限-2)+（历史上限 = options.editor_history_limit，默认 50）
+				int historyLimit = Math.max(1, readHistoryLimit(server));
+				boolean unsavedCapped = unsaved >= historyLimit - 1;
+				int unsavedDisplay = unsavedCapped ? Math.max(0, historyLimit - 2) : unsaved;
 				int contentVer = editor.getIntOr("content_ver", 0);
 				// content_ver：编辑器数据保存/修改时自增（数据包在确认保存处 bump），
 				// 用于在 cursor/playhead/playing/speed 都不变时也强制刷新（如音符属性面板保存）。
@@ -111,7 +115,7 @@ public final class TimelineSync {
 						|| noteSpeed != lastNoteSpeed || unsaved != lastUnsaved
 						|| contentVer != lastContentVer || !selFp.equals(lastSelectionFp);
 				if (changed) {
-					ShowPayload payload = buildPayload(editor, noteSpeed, unsaved);
+					ShowPayload payload = buildPayload(editor, noteSpeed, unsavedDisplay, unsavedCapped);
 					sendShow(server, payload);
 				}
 				initialized = true;
@@ -163,6 +167,24 @@ public final class TimelineSync {
 			return info.value();
 		} catch (Exception e) {
 			return 16;
+		}
+	}
+
+	/** 读取 options 计分板 editor_history_limit（撤销历史上限；无分返回 50 默认）。 */
+	private static int readHistoryLimit(MinecraftServer server) {
+		try {
+			Objective obj = server.getScoreboard().getObjective("options");
+			if (obj == null) {
+				return 50;
+			}
+			ReadOnlyScoreInfo info = server.getScoreboard()
+					.getPlayerScoreInfo(ScoreHolder.forNameOnly("editor_history_limit"), obj);
+			if (info == null || info.value() <= 0) {
+				return 50;
+			}
+			return info.value();
+		} catch (Exception e) {
+			return 50;
 		}
 	}
 
@@ -300,7 +322,7 @@ public final class TimelineSync {
 	}
 
 	/** 从 maps.editor 构造窗口 ShowPayload。异常一律返回最小空数据，保证不崩。 */
-	private static ShowPayload buildPayload(CompoundTag editor, int noteSpeed, int unsaved) {
+	private static ShowPayload buildPayload(CompoundTag editor, int noteSpeed, int unsavedDisplay, boolean unsavedCapped) {
 		try {
 			CompoundTag snapshot = currentSnapshot(editor);
 			int playhead = editor.getIntOr("playhead", 0);
@@ -318,7 +340,7 @@ public final class TimelineSync {
 			return new ShowPayload(
 					playhead, playing, windowLen,
 					timing.bpm, timing.bpb, timing.tpb,
-					playSpeed, noteSpeed, unsaved,
+					playSpeed, noteSpeed, unsavedDisplay, unsavedCapped,
 					snapshot.contains("end_time"), snapshot.getIntOr("end_time", 0),
 					resolveTitle(snapshot), snapshot.getStringOr("artist", ""),
 					notes, timing.list, events);
@@ -327,7 +349,7 @@ public final class TimelineSync {
 			return new ShowPayload(
 					editor.getIntOr("playhead", 0), editor.getBooleanOr("playing", false),
 					windowLen,
-					150.0f, 4, 8, 1.0f, noteSpeed, unsaved,
+					150.0f, 4, 8, 1.0f, noteSpeed, unsavedDisplay, unsavedCapped,
 					false, 0, "", "",
 					List.of(), List.of(), List.of());
 		}

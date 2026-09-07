@@ -97,6 +97,7 @@ public final class TimelinePayloads {
 			float playSpeed,
 			int noteSpeed, // 音符流速（note_speed options），状态栏"1.0x 16"里的 16
 			int unsavedCount, // 未保存编辑数 = |history_cursor - saved_cursor|，状态栏标题左侧
+			boolean unsavedCapped, // 未保存编辑数已达历史上限-1，显示为(上限-2)+
 			boolean hasEndTime, int endTime,
 			String title, String artist,
 			List<NoteEntry> notes, List<TimingEntry> timings, List<EventEntry> events
@@ -113,6 +114,7 @@ public final class TimelinePayloads {
 					buf.writeFloat(p.playSpeed());
 					buf.writeInt(p.noteSpeed());
 					buf.writeInt(p.unsavedCount());
+					buf.writeBoolean(p.unsavedCapped());
 					buf.writeBoolean(p.hasEndTime());
 					buf.writeInt(p.endTime());
 					ByteBufCodecs.STRING_UTF8.encode(buf, p.title());
@@ -131,6 +133,7 @@ public final class TimelinePayloads {
 						buf.readFloat(),
 						buf.readInt(),
 						buf.readInt(),
+						buf.readBoolean(),
 						buf.readBoolean(),
 						buf.readInt(),
 						ByteBufCodecs.STRING_UTF8.decode(buf),
