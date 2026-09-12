@@ -92,6 +92,8 @@ public final class TimelinePayloads {
 	public record ShowPayload(
 			int playhead,
 			boolean playing,
+			boolean rangeInSet, int rangeIn, // 时间范围选择：入点（选择工具 + 蹲下右键第一次）
+			boolean rangeOutSet, int rangeOut, // 出点（第二次；两者都有则客户端画七行贯通的半透明范围色带）
 			int timelineLength,
 			float bpm, int bpb, int tpb, // 播放头所在时间点参数
 			float playSpeed,
@@ -107,6 +109,10 @@ public final class TimelinePayloads {
 				(buf, p) -> {
 					buf.writeInt(p.playhead());
 					buf.writeBoolean(p.playing());
+					buf.writeBoolean(p.rangeInSet());
+					buf.writeInt(p.rangeIn());
+					buf.writeBoolean(p.rangeOutSet());
+					buf.writeInt(p.rangeOut());
 					buf.writeInt(p.timelineLength());
 					buf.writeFloat(p.bpm());
 					buf.writeInt(p.bpb());
@@ -126,6 +132,10 @@ public final class TimelinePayloads {
 				buf -> new ShowPayload(
 						buf.readInt(),
 						buf.readBoolean(),
+						buf.readBoolean(),
+						buf.readInt(),
+						buf.readBoolean(),
+						buf.readInt(),
 						buf.readInt(),
 						buf.readFloat(),
 						buf.readInt(),

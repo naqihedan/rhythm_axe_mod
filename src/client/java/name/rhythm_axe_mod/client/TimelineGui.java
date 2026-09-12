@@ -59,6 +59,10 @@ public final class TimelineGui implements HudElement {
 	private static final int COLOR_12 = 0xFF9E9E9E;  // 十二连 淡灰
 	private static final int COLOR_DEF = 0xFF8A8A8A; // 默认刻 更亮灰
 
+	// 时间范围选择（选择工具 + 蹲下右键设的入点/出点）：七行贯通色带 + 括住七行的大中括号
+	private static final int COLOR_RANGE = 0x5A7FB8E8;
+	private static final int COLOR_RANGE_BRACKET = 0xFF7FC8FF;
+
 	// 时间轴尺寸缩放（1 = 默认；后续接收服务端设置）
 	private static volatile float scale = 1f;
 	// 闲置淡出：10 秒无变化则整体透明度减半，逐渐过渡
@@ -212,6 +216,7 @@ public final class TimelineGui implements HudElement {
 		// ── 节奏染色刻度：按时间点分段（每段用各自 tpb/bpb 画小节线；时间点存在即新小节起点） ──
 		float start = displayPlayhead - len / 3.0f;
 		int end = (int) (start + len);
+
 		List<TimingEntry> timings = d.timings();
 		// 无时间点时用播放头所在段参数作全局网格（sectionStart=0）
 		TimingEntry fallback = new TimingEntry(0, d.bpm(), d.tpb(), d.bpb(), true);
@@ -302,6 +307,32 @@ public final class TimelineGui implements HudElement {
 			}
 		}
 
+		// ── 时间范围选择（选择工具 + 蹲下右键设的入点/出点）：画在最上层，盖住刻度线/音符/角标（仅播放头在其上）──
+		// 色带：左端格左缘 → 右端格右缘（+1 格，盖住最后一列），七行贯通；
+		// 括号：括住七行的大中括号，画在色带**内侧**（左括号在左端刻度线右边、右括号在右端刻度线左边，不压刻度线）；
+		//       方向由 min/max 决定 —— 第二次点的刻比第一次早时两边自动翻过来，始终把范围夹在中间
+		boolean hasIn = d.rangeInSet();
+		boolean hasOut = d.rangeOutSet();
+		if (hasIn || hasOut) {
+			int rangeLo = (hasIn && hasOut) ? Math.min(d.rangeIn(), d.rangeOut()) : (hasIn ? d.rangeIn() : d.rangeOut());
+			int rangeHi = (hasIn && hasOut) ? Math.max(d.rangeIn(), d.rangeOut()) : (hasIn ? d.rangeIn() : d.rangeOut());
+			int rangeRawL = xRaw(start, pxPerTick, x1, rangeLo);
+			int rangeRawR = xRaw(start, pxPerTick, x1, rangeHi) + grid; // +1 格：右端那一列整列也要盖住
+			if (hasIn && hasOut) {
+				int bandL = Math.max(x1, Math.min(x2, rangeRawL));
+				int bandR = Math.max(x1, Math.min(x2, rangeRawR));
+				if (bandR > bandL) {
+					graphics.fill(bandL, timelineTop, bandR, y2 - 1, withAlpha(COLOR_RANGE, alpha));
+				}
+			}
+			if (rangeRawL >= x1 && rangeRawL <= x2) {
+				drawRangeBracket(graphics, rangeRawL, timelineTop, y2 - 1, grid * 2, false, COLOR_RANGE_BRACKET, alpha);
+			}
+			if (hasIn && hasOut && rangeRawR >= x1 && rangeRawR <= x2) {
+				drawRangeBracket(graphics, rangeRawR, timelineTop, y2 - 1, grid * 2, true, COLOR_RANGE_BRACKET, alpha);
+			}
+		}
+
 		// ── 播放头（粗黄绿，贯穿所有行，固定）──
 		graphics.fill(playheadX - 1, timelineTop - 1, playheadX + 2, y2 - 1, withAlpha(0xFFCCFF33, alpha));
 		graphics.fill(playheadX - 3, timelineTop - 3, playheadX + 4, timelineTop + 1, withAlpha(0xFFCCFF33, alpha));
@@ -314,6 +345,30 @@ public final class TimelineGui implements HudElement {
 			return -1;
 		}
 		return x;
+	}
+
+	/** 时间 → x（不裁剪，可为面板外）。 */
+	private static int xRaw(float start, float pxPerTick, int x1, int time) {
+		return x1 + (int) ((time - start) * pxPerTick);
+	}
+
+	/** 时间范围两端的“大中括号”：竖杆 + 顶/底两条横臂，上下两半各占 halfH 高、中间留大空隙。
+	 *  right=false 画左括号（横臂朝右）、right=true 画右括号（横臂朝左）→ 两条相向把范围夹住。 */
+	private static void drawRangeBracket(GuiGraphicsExtractor g, int x, int top, int bot, int halfH, boolean right, int color, float alpha) {
+		int c = withAlpha(color, alpha);
+		int h = Math.max(4, bot - top);
+		int half = Math.min(halfH, Math.max(2, h / 2 - 1)); // 每半高度（不超过整高一半，保证中间仍有缝）
+		int arm = 5;                       // 横臂长度
+		int bar = 2;                       // 竖杆宽度
+		// 括号画在色带内侧：左括号贴左端刻度线右侧；右括号再往右一点点（+1px）压到刻度线上
+		int barL = right ? x - bar + 1 : x;
+		int xa = right ? barL - arm : barL;
+		int xb = right ? barL + bar : barL + bar + arm;
+		int yb = bot - half;               // 下半起点
+		g.fill(barL, top, barL + bar, top + half, c);  // 上半：竖杆（占 halfH 高）
+		g.fill(xa, top, xb, top + bar, c);             // 上半：横臂（顶）
+		g.fill(barL, yb, barL + bar, bot, c);          // 下半：竖杆（占 halfH 高）
+		g.fill(xa, bot - bar, xb, bot, c);             // 下半：横臂（底）
 	}
 
 	/** 在格子右下角绘制小数量角标（类物品栏数字；白字带阴影，随 alpha 淡出）。 */

@@ -50,6 +50,7 @@ public final class TimelineSync {
 	private static int lastUnsaved;
 	private static int lastContentVer;
 	private static String lastSelectionFp = "";
+	private static String lastRangeFp = "";
 	private static boolean wasOn;
 	private static int windowLen = 64;
 	private static int lastLoggedGui = -1;
@@ -75,6 +76,7 @@ public final class TimelineSync {
 		lastUnsaved = 0;
 		lastContentVer = 0;
 		lastSelectionFp = "";
+		lastRangeFp = "";
 		lastLoggedGui = -1;
 	}
 
@@ -110,10 +112,12 @@ public final class TimelineSync {
 				// 用于在 cursor/playhead/playing/speed 都不变时也强制刷新（如音符属性面板保存）。
 				// selection_fp：选中音符集合变化（选中/取消/清空）→ 刷新让客户端画黄色选中描边。
 				String selFp = selectionFingerprint(collectSelectedIds(editor));
+				String rangeFp = rangeFingerprint(editor);
 				boolean changed = !initialized || playing || playhead != lastPlayhead
 						|| cursor != lastCursor || playSpeed != lastPlaySpeed
 						|| noteSpeed != lastNoteSpeed || unsaved != lastUnsaved
-						|| contentVer != lastContentVer || !selFp.equals(lastSelectionFp);
+						|| contentVer != lastContentVer || !selFp.equals(lastSelectionFp)
+						|| !rangeFp.equals(lastRangeFp);
 				if (changed) {
 					ShowPayload payload = buildPayload(editor, noteSpeed, unsavedDisplay, unsavedCapped);
 					sendShow(server, payload);
@@ -126,6 +130,7 @@ public final class TimelineSync {
 				lastUnsaved = unsaved;
 				lastContentVer = contentVer;
 				lastSelectionFp = selFp;
+				lastRangeFp = rangeFp;
 			}
 		} else if (wasOn) {
 			// 开关关闭/编辑器退出 → 清理所有客户端
@@ -337,8 +342,14 @@ public final class TimelineSync {
 			TimingBundle timing = collectTimings(snapshot, windowStart, windowEnd, playhead);
 			List<EventEntry> events = collectEvents(snapshot, windowStart, windowEnd);
 
+			// 时间范围选择（选择工具 + 蹲下右键设的入点/出点，`NO_TIME` = 未设）
+			int rangeIn = timeRangeValue(editor, "in");
+			int rangeOut = timeRangeValue(editor, "out");
+
 			return new ShowPayload(
-					playhead, playing, windowLen,
+					playhead, playing,
+					rangeIn != NO_TIME, rangeIn, rangeOut != NO_TIME, rangeOut,
+					windowLen,
 					timing.bpm, timing.bpb, timing.tpb,
 					playSpeed, noteSpeed, unsavedDisplay, unsavedCapped,
 					snapshot.contains("end_time"), snapshot.getIntOr("end_time", 0),
@@ -348,6 +359,7 @@ public final class TimelineSync {
 			// 任何存储异常 → 返回一个最小可渲染包（仅显示信息，无物件），不输出日志噪音
 			return new ShowPayload(
 					editor.getIntOr("playhead", 0), editor.getBooleanOr("playing", false),
+					false, NO_TIME, false, NO_TIME,
 					windowLen,
 					150.0f, 4, 8, 1.0f, noteSpeed, unsavedDisplay, unsavedCapped,
 					false, 0, "", "",
@@ -426,6 +438,23 @@ public final class TimelineSync {
 		List<Integer> sorted = new ArrayList<>(ids);
 		Collections.sort(sorted);
 		return sorted.toString();
+	}
+
+	/** 未设时间（入点/出点）哨兵值：刻数非负，故用 MIN_VALUE 表示“未设”。 */
+	private static final int NO_TIME = Integer.MIN_VALUE;
+
+	/** 读取 maps.editor.time_select.<key>（选择工具 + 蹲下右键设的入点/出点）；不存在返回 NO_TIME。 */
+	private static int timeRangeValue(CompoundTag editor, String key) {
+		Optional<CompoundTag> ts = editor.getCompound("time_select");
+		if (ts.isEmpty() || !ts.get().contains(key)) {
+			return NO_TIME;
+		}
+		return ts.get().getIntOr(key, NO_TIME);
+	}
+
+	/** 时间范围（入点/出点）指纹，用于检测范围变化（设点/清除时立即推一次）。 */
+	private static String rangeFingerprint(CompoundTag editor) {
+		return timeRangeValue(editor, "in") + ":" + timeRangeValue(editor, "out");
 	}
 
 	/** 收集时间点（含 red 判定），并算出播放头所在时间点参数。
