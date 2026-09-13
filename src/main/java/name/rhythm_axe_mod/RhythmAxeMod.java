@@ -24,6 +24,7 @@ import net.minecraft.commands.arguments.IdentifierArgument;
 import net.minecraft.commands.synchronization.SuggestionProviders;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.Identifier;
+import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
 
 import org.slf4j.Logger;
@@ -35,6 +36,10 @@ public class RhythmAxeMod implements ModInitializer {
 
 	private static final SimpleCommandExceptionType ERROR_NO_TARGET =
 			new SimpleCommandExceptionType(Component.literal("必须指定目标玩家"));
+
+	/** 音乐位置诊断日志节流（每秒最多一行）+ 只在偏差超阈/刚开始播放时打印 */
+	private static long lastMusicPosLogMs;
+	private static boolean lastMusicPosPlaying;
 
 	@Override
 	public void onInitialize() {
@@ -55,6 +60,37 @@ public class RhythmAxeMod implements ModInitializer {
 		PayloadTypeRegistry.serverboundPlay().register(TimelinePayloads.ClientWindowPayload.TYPE, TimelinePayloads.ClientWindowPayload.STREAM_CODEC);
 		ServerPlayNetworking.registerGlobalReceiver(TimelinePayloads.ClientWindowPayload.TYPE, (payload, context) ->
 				TimelineSync.setWindowLen(payload.windowLen()));
+		// 客户端→服务端：音乐实际播放位置（诊断「音乐/游戏不同步」；也为后续「音乐驱动播放头」预留）
+		PayloadTypeRegistry.serverboundPlay().register(MusicPayloads.MusicPosPayload.TYPE, MusicPayloads.MusicPosPayload.STREAM_CODEC);
+		ServerPlayNetworking.registerGlobalReceiver(MusicPayloads.MusicPosPayload.TYPE, (payload, context) -> {
+			MinecraftServer server = context.player().level().getServer();
+			if (server == null) {
+				return;
+			}
+			boolean justStarted = payload.playing() && !lastMusicPosPlaying;
+			lastMusicPosPlaying = payload.playing();
+			int playhead = MusicTime.editorPlayhead(server);
+			double playheadMs = playhead == Integer.MIN_VALUE ? -1 : MusicTime.msAtTick(server, playhead);
+			double deltaMs = (playheadMs < 0 || payload.audibleMs() < 0)
+					? Double.NaN : payload.audibleMs() - playheadMs;
+			// 只在「刚开始播放」（每次一行基线）或「偏差 > 40ms」时打印：正常局静默，不同步时留证据
+			boolean offSync = Double.isNaN(deltaMs) || Math.abs(deltaMs) > 40;
+			if (!justStarted && !offSync) {
+				return;
+			}
+			long now = System.currentTimeMillis();
+			if (now - lastMusicPosLogMs < 1000) {
+				return; // 每秒最多一行
+			}
+			lastMusicPosLogMs = now;
+			double mspt = server.tickRateManager().millisecondsPerTick();
+			// delta<0 ⇒ 音乐落后（画面先到）；delta>0 ⇒ 音乐超前
+			LOGGER.info("[MusicSync] {}tps(mspt={}) playhead={}t({}ms) 出声={}ms 已排队={}ms delta={}ms speed={}",
+					String.format("%.1f", mspt <= 0 ? 0 : 1000.0 / mspt), String.format("%.2f", mspt),
+					playhead, playheadMs < 0 ? "n/a" : String.format("%.0f", playheadMs),
+					payload.audibleMs(), payload.queuedMs(),
+					Double.isNaN(deltaMs) ? "n/a" : String.format("%.0f", deltaMs), payload.speed());
+		});
 
 		CommandRegistrationCallback.EVENT.register((dispatcher, registryAccess, environment) -> {
 			registerHelpCommand(dispatcher);
@@ -198,6 +234,10 @@ public class RhythmAxeMod implements ModInitializer {
 				source.sendSuccess(() -> Component.literal("  §7开关 = options 计分板 §feditor_timeline_gui§7（1=显示，0=隐藏）"), false);
 				source.sendSuccess(() -> Component.literal("  §7纯显示无交互；播放头固定前 1/3，内容随谱面滚动；闲置 10s 自动淡出"), false);
 				source.sendSuccess(() -> Component.literal("  §7音符数/事件指令数 ≥2 时在格子右下角显示数量角标"), false);
+				source.sendSuccess(() -> Component.literal(""), false);
+				source.sendSuccess(() -> Component.literal("§e音乐自动对齐游戏："), false);
+				source.sendSuccess(() -> Component.literal("  §7编辑器试听时，音频与播放头偏差 >40ms 且已稳住 → 自动把音频挪到播放头（只动音频）"), false);
+				source.sendSuccess(() -> Component.literal("  §7开关 = options 计分板 §feditor_audio_align§7（1=开，0=关）"), false);
 				source.sendSuccess(() -> Component.literal(""), false);
 				source.sendSuccess(() -> Component.literal("§e权限等级：§f/tick 已降为 2 级，音乐指令为 2 级"), false);
 				source.sendSuccess(() -> Component.literal("§e客户端同步：§f速率 > 20 tps 时自动加速渲染"), false);

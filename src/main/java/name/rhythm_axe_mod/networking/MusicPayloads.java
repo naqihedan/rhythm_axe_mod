@@ -71,4 +71,26 @@ public final class MusicPayloads {
 			return TYPE;
 		}
 	}
+
+	/**
+	 * 客户端→服务端：音乐实际播放位置（诊断用，也为后续「音乐驱动播放头」预留）。
+	 *
+	 * audibleMs = 真正**出声**的位置（当前缓冲内偏移 + 已播完缓冲换算），单位毫秒（源时间轴）；
+	 * queuedMs  = 已**排队**的位置（比出声位置提前若干缓冲）；
+	 * 两者之差即声卡排队深度，用来确认"偏差"到底出在排队还是出在启动时刻。
+	 */
+	public record MusicPosPayload(int audibleMs, int queuedMs, float speed, boolean playing) implements CustomPacketPayload {
+		public static final Type<MusicPosPayload> TYPE = new Type<>(Identifier.parse("rhythm_axe_mod:music_pos"));
+		public static final StreamCodec<ByteBuf, MusicPosPayload> STREAM_CODEC = StreamCodec.composite(
+				ByteBufCodecs.VAR_INT, MusicPosPayload::audibleMs,
+				ByteBufCodecs.VAR_INT, MusicPosPayload::queuedMs,
+				ByteBufCodecs.FLOAT, MusicPosPayload::speed,
+				ByteBufCodecs.BOOL, MusicPosPayload::playing,
+				MusicPosPayload::new);
+
+		@Override
+		public Type<? extends CustomPacketPayload> type() {
+			return TYPE;
+		}
+	}
 }

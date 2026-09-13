@@ -8,6 +8,9 @@ import net.minecraft.nbt.ListTag;
 import net.minecraft.resources.Identifier;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.world.level.storage.CommandStorage;
+import net.minecraft.world.scores.Objective;
+import net.minecraft.world.scores.ReadOnlyScoreInfo;
+import net.minecraft.world.scores.ScoreHolder;
 
 /**
  * /playmusic 的 tick→毫秒 换算。
@@ -59,6 +62,89 @@ public final class MusicTime {
 		}
 		float msPerTick = server.tickRateManager().millisecondsPerTick();
 		return new Result((int) Math.min((float) startTick * msPerTick, (float) MAX_MS), false);
+	}
+
+	/**
+	 * 编辑器播放头对应的毫秒（供「音乐对齐游戏」用）。
+	 *
+	 * 未打开编辑器 / 读取异常 / 自动对齐被关掉 → 返回 -1（调用方跳过对齐）。
+	 * 开关 = options 计分板 {@code editor_audio_align}（0=关，缺失或其它值=开，见《设置.md》）。
+	 */
+	public static int editorPlayheadMs(MinecraftServer server) {
+		try {
+			CompoundTag editor = server.getCommandStorage().get(EDITOR_STORAGE);
+			if (editor == null || !editor.getBooleanOr("active", false)) {
+				return -1;
+			}
+			if (!audioAlignEnabled(server)) {
+				return -1;
+			}
+			double ms = msAtTick(server, editor.getIntOr("playhead", 0));
+			return (int) Math.min(ms, MAX_MS);
+		} catch (Exception ignored) {
+			return -1;
+		}
+	}
+
+	/** 自动对齐开关：options 计分板 editor_audio_align（0=关；缺失或 options 未初始化=开）。 */
+	private static boolean audioAlignEnabled(MinecraftServer server) {
+		try {
+			Objective obj = server.getScoreboard().getObjective("options");
+			if (obj == null) {
+				return true;
+			}
+			ReadOnlyScoreInfo info = server.getScoreboard()
+					.getPlayerScoreInfo(ScoreHolder.forNameOnly("editor_audio_align"), obj);
+			return info == null || info.value() != 0;
+		} catch (Exception e) {
+			return true;
+		}
+	}
+
+	/**
+	 * 编辑器当前播放头（刻）。未打开编辑器/读取异常返回 {@link Integer#MIN_VALUE}。
+	 * （诊断与「音乐驱动播放头」用；与 convert 读同一份 storage）
+	 */
+	public static int editorPlayhead(MinecraftServer server) {
+		try {
+			CompoundTag editor = server.getCommandStorage().get(EDITOR_STORAGE);
+			if (editor != null && editor.getBooleanOr("active", false)) {
+				return editor.getIntOr("playhead", 0);
+			}
+		} catch (Exception ignored) {
+			// 存储异常 → 视作未打开
+		}
+		return Integer.MIN_VALUE;
+	}
+
+	/**
+	 * 与 {@link #convert} 同一套规则的 tick→毫秒（不依赖 CommandSourceStack，供诊断/服务端逻辑用）。
+	 * 优先工作副本时间点分段换算；回退 tick×当前 mspt。
+	 */
+	public static double msAtTick(MinecraftServer server, int tick) {
+		try {
+			CommandStorage storage = server.getCommandStorage();
+			CompoundTag editor = storage.get(EDITOR_STORAGE);
+			if (editor != null && editor.getBooleanOr("active", false) && editor.contains("mapid")) {
+				Optional<ListTag> tps = workingCopyTimingPoints(editor);
+				if (tps.isEmpty() || tps.get().isEmpty()) {
+					String mapid = editor.getStringOr("mapid", "");
+					if (!mapid.isEmpty()) {
+						CompoundTag map = storage.get(Identifier.parse("rhythm_axe:maps." + mapid));
+						tps = map == null ? Optional.empty() : map.getList("timing_points");
+					}
+				}
+				if (tps.isPresent() && !tps.get().isEmpty()) {
+					double ms = piecewise(tps.get(), tick);
+					if (ms >= 0) {
+						return ms;
+					}
+				}
+			}
+		} catch (Exception ignored) {
+			// 回退 mspt
+		}
+		return tick * server.tickRateManager().millisecondsPerTick();
 	}
 
 	/** 从编辑工作副本（maps.editor.history[history_cursor]）取 timing_points，没有则空。 */
