@@ -408,7 +408,8 @@ public class RhythmAxeMusic {
         AL10.alSourceStop(source);
         unqueueAll();
         playing = false;
-        message("§a音乐已暂停");
+        // 不再弹客户端聊天消息：与 playmusic 一致 —— 客户端反馈无法区分执行者，
+        // 数据包（编辑器暂停/到尾自动暂停）调用时不该刷聊天栏；玩家手动 /pausemusic 时由服务端 feedbackIfPlayer 反馈。
     }
 
     /** 继续。未播放时无事发生。 */
@@ -427,7 +428,7 @@ public class RhythmAxeMusic {
         playing = true;
         alignStreak = 0;
         alignCooldown = 0;   // 续播：重新判定（暂停期间偏差不会漂，通常无需动作）
-        message("§a音乐已继续");
+        // 同上：不弹客户端聊天消息（玩家手动 /resumemusic 由服务端 feedbackIfPlayer 反馈）
     }
 
     /** 停止并释放音乐。 */
@@ -443,7 +444,7 @@ public class RhythmAxeMusic {
         alignStreak = 0;
         alignCooldown = 0;
         pendingId = null;
-        message("§a音乐已停止");
+        // 同上：不弹客户端聊天消息（玩家手动 /stopmusic 由服务端 feedbackIfPlayer 反馈）
     }
 
     /** 每客户端刻调用：回收播完的缓冲并续上后续数据。 */
