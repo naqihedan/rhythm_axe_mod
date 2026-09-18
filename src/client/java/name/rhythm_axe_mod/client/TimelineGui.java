@@ -82,18 +82,18 @@ public final class TimelineGui implements HudElement {
 	};
 	private static final int DYE_UNSET = 0xFF808080;
 
-	// 染料色号 1-16 对应的染色混凝土方块
+	// 染料色号 1-16 对应的染色混凝土方块（26.2 起彩色方块常量改为 ColorCollection）
 	private static final Block[] CONCRETE = {
-			Blocks.WHITE_CONCRETE, Blocks.GRAY_CONCRETE, Blocks.LIGHT_GRAY_CONCRETE, Blocks.BLACK_CONCRETE,
-			Blocks.BROWN_CONCRETE, Blocks.RED_CONCRETE, Blocks.ORANGE_CONCRETE, Blocks.YELLOW_CONCRETE,
-			Blocks.LIME_CONCRETE, Blocks.GREEN_CONCRETE, Blocks.CYAN_CONCRETE, Blocks.LIGHT_BLUE_CONCRETE,
-			Blocks.BLUE_CONCRETE, Blocks.PURPLE_CONCRETE, Blocks.MAGENTA_CONCRETE, Blocks.PINK_CONCRETE
+			Blocks.CONCRETE.white(), Blocks.CONCRETE.gray(), Blocks.CONCRETE.lightGray(), Blocks.CONCRETE.black(),
+			Blocks.CONCRETE.brown(), Blocks.CONCRETE.red(), Blocks.CONCRETE.orange(), Blocks.CONCRETE.yellow(),
+			Blocks.CONCRETE.lime(), Blocks.CONCRETE.green(), Blocks.CONCRETE.cyan(), Blocks.CONCRETE.lightBlue(),
+			Blocks.CONCRETE.blue(), Blocks.CONCRETE.purple(), Blocks.CONCRETE.magenta(), Blocks.CONCRETE.pink()
 	};
 	private static final Block[] GLASS = {
-			Blocks.WHITE_STAINED_GLASS, Blocks.GRAY_STAINED_GLASS, Blocks.LIGHT_GRAY_STAINED_GLASS, Blocks.BLACK_STAINED_GLASS,
-			Blocks.BROWN_STAINED_GLASS, Blocks.RED_STAINED_GLASS, Blocks.ORANGE_STAINED_GLASS, Blocks.YELLOW_STAINED_GLASS,
-			Blocks.LIME_STAINED_GLASS, Blocks.GREEN_STAINED_GLASS, Blocks.CYAN_STAINED_GLASS, Blocks.LIGHT_BLUE_STAINED_GLASS,
-			Blocks.BLUE_STAINED_GLASS, Blocks.PURPLE_STAINED_GLASS, Blocks.MAGENTA_STAINED_GLASS, Blocks.PINK_STAINED_GLASS
+			Blocks.STAINED_GLASS.white(), Blocks.STAINED_GLASS.gray(), Blocks.STAINED_GLASS.lightGray(), Blocks.STAINED_GLASS.black(),
+			Blocks.STAINED_GLASS.brown(), Blocks.STAINED_GLASS.red(), Blocks.STAINED_GLASS.orange(), Blocks.STAINED_GLASS.yellow(),
+			Blocks.STAINED_GLASS.lime(), Blocks.STAINED_GLASS.green(), Blocks.STAINED_GLASS.cyan(), Blocks.STAINED_GLASS.lightBlue(),
+			Blocks.STAINED_GLASS.blue(), Blocks.STAINED_GLASS.purple(), Blocks.STAINED_GLASS.magenta(), Blocks.STAINED_GLASS.pink()
 	};
 
 	public TimelineGui() {
@@ -252,7 +252,7 @@ public final class TimelineGui implements HudElement {
 			if (x < 0) {
 				continue;
 			}
-			Block b = tp.red() ? Blocks.RED_CONCRETE : Blocks.GREEN_CONCRETE;
+			Block b = tp.red() ? Blocks.CONCRETE.red() : Blocks.CONCRETE.green();
 			drawBlock(graphics, b, x, timelineTop + 1, grid);
 		}
 
@@ -262,7 +262,7 @@ public final class TimelineGui implements HudElement {
 			if (x < 0) {
 				continue;
 			}
-			drawBlock(graphics, Blocks.LIGHT_BLUE_CONCRETE, x, timelineTop + grid + 1, grid);
+			drawBlock(graphics, Blocks.CONCRETE.lightBlue(), x, timelineTop + grid + 1, grid);
 			if (ev.commandCount() >= 2) {
 				drawCountTag(graphics, font, x, timelineTop + grid + 1, grid, ev.commandCount(), alpha);
 			}

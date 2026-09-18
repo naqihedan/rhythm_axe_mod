@@ -36,7 +36,7 @@ public class ClickEventConfirmBypassMixin {
                 if (!shouldConfirm) {
                     // gamerule=false → 直接发送命令，跳过确认逻辑
                     ((ClientCommonPacketListenerImpl)(Object)this).send(new ServerboundChatCommandPacket(command));
-                    Minecraft.getInstance().setScreen(screen);
+                    Minecraft.getInstance().setScreenAndShow(screen);
                     ci.cancel();
                 }
                 // gamerule=true → 走原版逻辑

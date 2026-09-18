@@ -497,8 +497,8 @@ public class RhythmAxeMusic {
     /** 在本机聊天栏显示消息（每客户端本地反馈，多人也各自可见）。 */
     private static void message(String msg) {
         Minecraft mc = Minecraft.getInstance();
-        if (mc != null && mc.gui != null) {
-            mc.gui.getChat().addClientSystemMessage(Component.literal(msg));
+        if (mc != null && mc.player != null) {
+            mc.player.sendSystemMessage(Component.literal(msg));
         }
     }
 
