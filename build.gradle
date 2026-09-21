@@ -3,7 +3,9 @@ plugins {
 	id 'maven-publish'
 }
 
-version = project.mod_version
+// 版本号 = **编译日期**（yy.M.d，如 26.9.18 = 2026-09-18）：jar 名与 fabric.mod.json 都跟着变，
+// 一眼能看出 mods 里装的是哪天的构建；需要固定版本时用 .\gradlew.bat build -Pmod_version=1.5.0
+version = project.hasProperty('mod_version') ? project.mod_version : new Date().format('yy.M.d')
 group = project.maven_group
 
 repositories {

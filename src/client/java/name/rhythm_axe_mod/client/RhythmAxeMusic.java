@@ -17,6 +17,7 @@ import org.slf4j.Logger;
 import com.mojang.logging.LogUtils;
 
 import it.unimi.dsi.fastutil.floats.FloatArrayList;
+import name.rhythm_axe_mod.mixin.MinecraftServerAccessor;
 import name.rhythm_axe_mod.music.MusicTime;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.resources.sounds.Sound;
@@ -26,10 +27,15 @@ import net.minecraft.network.chat.Component;
 import net.minecraft.resources.Identifier;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.packs.resources.Resource;
+import net.minecraft.sounds.SoundSource;
 import net.minecraft.util.RandomSource;
+import net.minecraft.world.scores.Objective;
+import net.minecraft.world.scores.ReadOnlyScoreInfo;
+import net.minecraft.world.scores.ScoreHolder;
 
 /**
- * 编辑器音乐播放器（阶段0，多人版）。
+ * 演奏音乐播放器（阶段0，多人版）：**编辑器试听**与**正式游玩**共用同一条播放路径
+ * （都由数据包 /playmusic 驱动，见《游玩谱面.md》音乐播放）。
  *
  * 思路：MC 26.1 的 JOrbisAudioStream 是纯顺序解码、没有 seek 接口，
  * 因此播放时把整首 OGG 一次性解码成 16bit PCM 存入内存，
@@ -54,17 +60,40 @@ public class RhythmAxeMusic {
     /** 解码保护上限：最多解析 20 分钟的采样，防止异常文件死循环 */
     private static final long MAX_DECODE_SAMPLES = 20L * 60 * 48000;
 
-    // ── 「音乐对齐游戏」自动对齐参数（音乐服从游戏，永不改动播放头） ──
-    /** 偏差容忍（ms，≈1.6 刻）：小于此值不动音频。 */
-    private static final int ALIGN_TOLERANCE_MS = 40;
+    // ── 「音乐对齐游戏」自动对齐参数（音乐服从游戏，永不改动播放头；编辑器试听与正式游玩共用） ──
+    /**
+     * **0.25x 下实测标定的补偿量**（音乐 ms，负 = 让音频更晚；2026-09-21 用户用耳朵标定）。
+     * 计分板 `audio_sync_offset` 缺失时用它；设成其它值（含 0 = 关掉补偿）则覆盖。
+     * 实际应用时按 (1−speed)/(1−0.25) 缩放——见 {@link #syncOffsetApplied()}。
+     */
+    private static final int SYNC_A25_DEFAULT = -50;
+
+    /**
+     * 偏差容忍**下限**（**音乐源毫秒**，1x 下 ≈0.8 刻；实际取 max(此值, 每刻音乐毫秒/2 + 10)）：小于此值不动音频。
+     * 必须 ≥ 半个刻 —— 采样相位未知，同一同步状态测到的 delta 天然在 [−Δ/2, +Δ/2] 间摆，
+     * 门限比它小就会把正常摆动当成偏差，每修一次把音频推偏一点（越修越歪）。
+     * 注意这是「允许音乐内容偏多少毫秒」，不随播放速率缩放：慢了（0.25x）时同样的音乐毫秒
+     * 对应 4 倍真实时间，所以容差宁紧勿松，否则残留会被放大成可听的延后。
+     */
+    private static final int ALIGN_TOLERANCE_MS = 20;
     /** 需连续超阈的刻数（0.5s）才动手：避开「开局世界加载」那种一过性震荡。 */
     private static final int ALIGN_STREAK_TICKS = 20;
-    /** 窗口内偏差变化超过此值 = 还在被世界加载/GC 拖着跑 → 本次不对齐，重新取样。 */
+    /**
+     * 窗口内偏差变化容忍**下限**：超过「max(此值, 每刻音乐毫秒)」= 还在被世界加载/GC 拖着跑 → 本次不对齐，重新取样。
+     * 必须允许一整刻的摆幅：采样相位未知，同一同步状态测到的 delta 天然在 [0, 每刻音乐毫秒] 之间跳。
+     */
     private static final int ALIGN_STABLE_DRIFT_MS = 30;
-    /** 单次最大位移（ms）：大偏差分几次收敛，避免一次跳掉一大段音乐。 */
+    /**
+     * 单次最大位移（**真实毫秒**，1x 下即 400 音乐毫秒）：大偏差分几次收敛，避免一次跳掉一大段音乐。
+     * 慢放时同一段音乐内容被拉长，用固定音乐毫秒会跳得越来越久 → 用真实毫秒折算出音乐毫秒（见 alignTick）。
+     */
     private static final int ALIGN_MAX_STEP_MS = 400;
     /** 对齐后的冷却刻数（0.5s）：避免反复微调造成的可闻抖动。 */
     private static final int ALIGN_COOLDOWN_TICKS = 20;
+    /** 多人推送值（{@link #setPushedPlayhead}）的有效期（ms）：服务端每刻推一次，这么久没更新就当失效。 */
+    private static final int PUSHED_HEAD_TTL_MS = 500;
+    /** 延迟补偿上限（ms）：ping/2 超过它就不补了（避免异常 ping 值把播放头拽飞）。 */
+    private static final int PUSHED_HEAD_PING_CAP_MS = 100;
 
     private static int source = 0;
     private static int[] buffers = new int[BUFFER_COUNT];
@@ -79,11 +108,18 @@ public class RhythmAxeMusic {
     private static float speed = 1f;   // 播放速率（OLA 时域拉伸，保调）
     private static boolean finished;   // PCM 已全部排入（等待声卡播完）
     private static boolean playing;    // 用户意图：正在播放
+    private static float baseVolume = 1f;   // 命令音量（/playmusic 的 volume 参数），实际增益还要乘游戏内音量
+    private static float appliedGain = -1f; // 上次写入 AL_GAIN 的值（-1 = 无效值，强制重写）
     private static String currentId;   // 当前曲目（用于反馈）
 	private static long lastPosLogMs;  // 上次位置日志时间戳（诊断）
 	private static int alignStreak;    // 连续超阈刻数（自动对齐判定用）
 	private static int alignCooldown;  // 对齐后剩余冷却刻数
 	private static int alignRefDelta;  // 窗口起点的偏差（判「是否已经稳住」）
+	private static int seekResidual;   // 上次 seek 的落点残差（音乐 ms）：实测 delta − 目标
+	private static boolean seekPending; // 刚 seek 过，等一次采样去量落点残差
+	// 多人用：服务端每刻推送的游戏播放头（单人不用 —— 客户端直接读集成服务端，零延迟）
+	private static int pushedHeadMs = -1;
+	private static long pushedHeadAt;   // 收到时刻（System.currentTimeMillis）
 	// 挂起起播（曲目尚未解码完）：绝不阻塞渲染线程，解完再用「当前播放头」起播
 	private static String pendingId;
 	private static int pendingStartMs;
@@ -109,6 +145,15 @@ public class RhythmAxeMusic {
     /** 当前播放速率（保调变速倍率）。 */
     public static float currentSpeed() {
         return speed;
+    }
+
+    /**
+     * 收到服务端推送的**游戏播放头**（{@code MusicPayloads.HeadPayload}，每刻一个）——多人对齐用。
+     * valid=false 表示当前没有可对齐的目标（不在编辑/游玩中、对齐开关关闭、读取异常）。
+     */
+    public static void setPushedPlayhead(int playheadMs, boolean valid) {
+        pushedHeadMs = valid ? Math.max(playheadMs, 0) : -1;
+        pushedHeadAt = System.currentTimeMillis();
     }
 
     /**
@@ -140,10 +185,22 @@ public class RhythmAxeMusic {
      * 每客户端刻调用一次（只许在 ClientTickEvents 里调，渲染帧回调会多算刻数）：
      * **把音频对齐到游戏播放头** —— 方向是「音乐服从游戏」，播放头一动不动。
      *
-     * 偏差 = 出声位置 − 播放头毫秒（同一套源时间轴，见 {@link MusicTime}）。
-     * 判定条件：|偏差| 持续 {@link #ALIGN_STREAK_TICKS} 刻超 {@link #ALIGN_TOLERANCE_MS} ms，
-     * 且这 0.5s 内偏差变化 ≤ {@link #ALIGN_STABLE_DRIFT_MS} ms（= 已经「定住」，
-     * 不是正被世界加载/GC 拖着跑）才动手；单次最多挪 {@link #ALIGN_MAX_STEP_MS} ms，
+     * 目标位置（{@link #gamePlayheadMs()}）：编辑器试听 = maps.editor.playhead；
+     * 正式游玩 = play_state.time（歌曲时间轴），两者都是服务端刻、由 {@link MusicTime} 换算成毫秒。
+     * 偏差 delta = 出声位置 − 播放头毫秒（同一套源时间轴）。
+     *
+     * ★ **阶梯窗口 + 刻内相位**：播放头只在每刻跳一次（阶梯），音频却是连续走的 ⇒ 在刻内相位 φ 处采样，
+     * delta 的应有值就是 φ×每刻音乐毫秒；而理想对齐（刻边界 delta = 0）会让音频在刻内一路领先到整刻
+     * （慢放时可闻），故把目标整体下移半刻（**居中**）：
+     * center = (φ−0.5)×每刻音乐毫秒 + 同步偏移，容差 = max({@link #ALIGN_TOLERANCE_MS}, 每刻音乐毫秒/2 + 10)。
+     * ⚠️ **量纲**：delta / 播放头 / 音频位置都在**音乐源毫秒**轴上，而 mspt 是**真实毫秒**，
+     * 每刻音乐毫秒 = 真实刻长 × 播放速率（speed<1 时真实刻更长，但每刻走过的音乐内容不变）。
+     * 若直接拿 mspt 当音乐刻长，慢放时期望领先量会被放大 1/speed 倍（0.25x → 4 倍），
+     * 稳态偏差就停在 center+容差（实测 ≈115 音乐毫秒 = 慢放下 460 真实毫秒），听感即「游戏延后」。
+     * 判定条件：delta 出窗持续 {@link #ALIGN_STREAK_TICKS} 刻，且这段窗口内 delta 变化 ≤ max({@link #ALIGN_STABLE_DRIFT_MS}, 每刻音乐毫秒)
+     * （后者是「采样相位未知」造成的固有摆动，必须容忍，否则慢放/长刻下稳定条件永不成立）
+     * （= 已经「定住」，不是正被世界加载/GC 拖着跑）才动手；
+     * 修正目标 = 期望位置（delta = center），单次最多挪 {@link #ALIGN_MAX_STEP_MS} ms，
      * 对齐后冷却 {@link #ALIGN_COOLDOWN_TICKS} 刻，避免反复微调产生可闻抖动。
      *
      * 为什么要求「稳住」：开局世界加载时播放头会一时落后于实时音乐（偏差从 −600ms 自己收敛回 0），
@@ -164,23 +221,52 @@ public class RhythmAxeMusic {
             alignCooldown--;
             return;
         }
-        int playheadMs = editorPlayheadMs();
+        int playheadMs = gamePlayheadMs();
         int audible = audibleMs();
         if (playheadMs < 0 || audible < 0) {
+            diagTick(mc, audible);   // 对齐关/拿不到播放头 → 照样周期打诊断（标定采样用）
             alignStreak = 0;
             return;
         }
+        // ★ 量纲：每刻音乐毫秒 = 真实刻长 × 播放速率（见方法注释）
+        int tickMs = currentTickMs(mc);
+        int tickSrcMs = (int) Math.max(1, Math.round(tickMs * (double) speed));
+        // ★★ 采样相位补偿：播放头是**阶梯值**（本刻刚跳上去、整刻不动），音频却连续走 ⇒ 在刻内相位 φ
+        //   处采样，delta 的**应有值**就是 φ×每刻音乐毫秒，而不是 0、更不是「半刻」这个平均值。
+        //   （拿平均值当目标的后果：允许偏差窗口整体上移半刻，慢放时“合法领先”被放大成几百 ms 的延后。）
+        //   单机直接读服务端调度时钟（nextTickTimeNanos）拿到 φ；多人拿不到 → 退回平均半刻的期望值。
+        MinecraftServer server = mc.getSingleplayerServer();
+        float phase = server != null ? tickPhase(server) : -1f;   // <0 = 读不到服务端调度时钟
+        float effPhase = phase < 0f ? 0.5f : phase;                // 读不到 → 退回「平均半刻」
+        // ★ 相位补偿 + **居中**：理想对齐是「刻边界处偏差 0」，但那样在刻内音频会一路领先到整刻
+        //   （慢放时每刻的真实时间被拉长 ⇒ 听感就是“音乐抢拍”，最大可达一个 mspt）。
+        //   把目标整体下移半刻 ⇒ 音频相位误差在 [−Δ/2, +Δ/2] 摆动，最大提前量减半、听感居中。
+        int center = Math.round((effPhase - 0.5f) * tickSrcMs) + syncOffsetApplied();
+        // ★ 容差必须 ≥ 半个刻：先前的 20ms 比「期望领先」还小 ⇒ 连 3ms 的正常摆动都被判成偏差，
+        //   每一次修正都把音频往前推一次，越修越提前（日志里 [MusicAlign] 偏差 -3ms 就是它）。
+        int tol = Math.max(ALIGN_TOLERANCE_MS, Math.round(tickSrcMs / 2f) + 10);
+        int stableDrift = Math.max(ALIGN_STABLE_DRIFT_MS, tickSrcMs + 10);
         int delta = audible - playheadMs;
-        if (Math.abs(delta) <= ALIGN_TOLERANCE_MS) {
+        // ★ 刚 seek 过 → 先量一次「落点残差」：seek 的实际落点与目标之间总有几十毫秒差，
+        //   不扣掉的话它会被当成新偏差 ⇒ 每隔几秒再 seek 一次（听感就是“音乐一直在自动调整”）。
+        if (seekPending) {
+            seekPending = false;
+            seekResidual = delta - center;
+            alignStreak = 0;
+            alignCooldown = Math.max(alignCooldown, ALIGN_COOLDOWN_TICKS);
+            return;
+        }
+        int eff = delta - center - seekResidual;   // 扣掉落点残差后的真实偏差（音乐 ms）
+        if (eff >= -tol && eff <= tol) {
             alignStreak = 0;
             return;
         }
-        // 偏差超阈：每秒补一行诊断（正常局静默，一出问题就留证据）
+        // 偏差出窗：每秒补一行诊断（正常局静默，一出问题就留证据）
         long now = System.currentTimeMillis();
         if (now - lastPosLogMs >= 1000) {
             lastPosLogMs = now;
-            LOGGER.info("[MusicPos] 出声={}ms 播放头={}ms delta={}ms 已排队={}ms speed={}",
-                    audible, playheadMs, delta, queuedMs(), speed);
+            LOGGER.info("[MusicPos] 出声={}ms 播放头={}ms delta={}ms 期望={}ms 残差={}ms 有效={}ms 相位={} 每刻音乐={}ms 偏移={}ms speed={}",
+                    audible, playheadMs, delta, center, seekResidual, eff, String.format("%.2f", phase), tickSrcMs, syncOffsetApplied(), speed);
         }
         if (alignStreak == 0) {
             alignStreak = 1;
@@ -192,31 +278,192 @@ public class RhythmAxeMusic {
             return;
         }
         alignStreak = 0;
-        if (Math.abs(delta - alignRefDelta) > ALIGN_STABLE_DRIFT_MS) {
-            return; // 这 0.5s 内偏差还在大幅变化 → 重新取样，等它稳住再对齐
+        if (Math.abs(delta - alignRefDelta) > stableDrift) {
+            return; // 这段窗口内偏差还在大幅变化 → 重新取样，等它稳住再对齐
         }
-        // ★ 朝播放头方向挪：delta<0（音乐落后）→ 音频往前；delta>0（音乐超前）→ 音频往后。
+        // ★ 朝期望位置（delta == center）挪：delta<0（音乐落后）→ 音频往前；delta>0（音乐超前）→ 音频往后。
         //   （曾写成 target = playhead + delta，那等于「挪到它现在的位置」，永远不生效。）
-        int applied = Math.min(Math.abs(delta), ALIGN_MAX_STEP_MS);
-        int target = delta > 0 ? audible - applied : audible + applied;
+        int correction = eff;
+        // 单次位移上限按**真实时间**限幅：慢放时源毫秒被拉长，固定音乐毫秒会跳得越来越久
+        int maxStep = (int) Math.max(50, Math.round(ALIGN_MAX_STEP_MS * (double) speed));
+        int applied = Math.min(Math.abs(correction), maxStep);
+        int target = correction > 0 ? audible - applied : audible + applied;
         if (seekAudioTo(target)) {
+            seekPending = true;   // 下一次采样去量落点残差，避免反复 seek
             alignCooldown = ALIGN_COOLDOWN_TICKS;
-            LOGGER.info("[MusicAlign] 偏差 {}ms（播放头 {}ms / 出声 {}ms）→ 音频已挪到 {}ms，剩余 {}ms",
-                    delta, playheadMs, audible, target, playheadMs - target);
+            LOGGER.info("[MusicAlign] 偏差 {}ms（播放头 {}ms / 出声 {}ms / 期望 {}ms）→ 音频已挪到 {}ms",
+                    delta, playheadMs, audible, center, target);
         }
     }
 
     /**
-     * 编辑器播放头毫秒。**只有单人集成服务端**才读（多人没有该存储，直接放弃对齐）；
-     * 未打开编辑器 / 数据包把 audio_align 设为 0b → -1。
+     * 当前**真实**刻长（ms）：编辑器试听与正式游玩都会把 tick rate 设成「谱面刻长 ÷ 播放速度」，
+     * 所以慢放时它变长。对齐窗口不能直接用它的毫秒数（那是真实时间，不是音乐时间），
+     * 必须先 × {@link #speed} 换到音乐源时间轴——见 {@link #alignTick()} 的量纲说明。
      */
-    private static int editorPlayheadMs() {
+    private static int currentTickMs(Minecraft mc) {
+        MinecraftServer server = mc.getSingleplayerServer();
+        if (server == null) {
+            return 0;
+        }
+        return (int) Math.max(1, Math.round(server.tickRateManager().millisecondsPerTick()));
+    }
+
+    /**
+     * 服务端当前刻的**刻内相位** φ ∈ [0,1]：0 = 本刻刚开始，1 = 本刻即将结束。
+     *
+     * 播放头是阶梯值（整刻不动），音频却连续走 ⇒ 在相位 φ 处采样，delta 的应有值 = φ × 每刻音乐毫秒。
+     * **读不到调度时钟**（多人 / Accessor 失效 / 时钟异常）→ 返回 **-1**（哨兵；调用方退回「平均半刻」，
+     * 日志里会直接表现为 `相位=-1.00`，别再用 0.5 冒充，那样无法分辨“恰好采在中点”与“根本没读到”）。
+     * nextTickTimeNanos 与 System.nanoTime() 同源（服务器主循环就是拿两者比较来开新刻的）。
+     */
+    private static float tickPhase(MinecraftServer server) {
+        try {
+            MinecraftServerAccessor acc = (MinecraftServerAccessor) server;
+            double mspt = server.tickRateManager().millisecondsPerTick();
+            long nsPerTick = (long) (mspt * 1_000_000.0);
+            if (nsPerTick <= 0) {
+                return -1f;
+            }
+            long remain = acc.getNextTickTimeNanos() - System.nanoTime();
+            float phase = 1f - (float) ((double) remain / (double) nsPerTick);
+            if (phase < 0f) {
+                phase = 0f;
+            }
+            if (phase > 1f) {
+                phase = 1f;
+            }
+            return phase;
+        } catch (Throwable t) {
+            return -1f;
+        }
+    }
+
+    /**
+     * 用户可调的「音频同步偏移」基准（**0.25x 下所需的音乐毫秒**，options 计分板假玩家 {@code audio_sync_offset}；缺失 = 内置默认）。
+     *
+     * 为什么需要：测量链路里存在固定偏移（OLA 时域拉伸的半窗延迟、音频输出/驱动延迟等），
+     * 它让 `delta` 报得比耳朵听到的偏一边 —— 对齐于是朝错误方向使劲（表现为“音乐越修越早/越晚”）。
+     * 这个值无法从代码推出来（跟设备与音频实现有关），必须**用耳朵标定**：调它直到听起来同步。
+     * 正值 = 目标 delta 变大 = 让音频更早；负值 = 让音频更晚。
+     * 游戏内调法：`/scoreboard players set audio_sync_offset options -60`（在 **0.25x** 下调，其它速度会自动按比例缩放）。
+     */
+    private static int syncOffsetMs() {
         try {
             Minecraft mc = Minecraft.getInstance();
             MinecraftServer server = mc == null ? null : mc.getSingleplayerServer();
-            return server == null ? -1 : MusicTime.editorPlayheadMs(server);
+            if (server == null) {
+                return SYNC_A25_DEFAULT;   // 多人拿不到服务端计分板（多人对齐本来就走推送播放头）
+            }
+            Objective obj = server.getScoreboard().getObjective("options");
+            if (obj == null) {
+                return SYNC_A25_DEFAULT;
+            }
+            ReadOnlyScoreInfo info = server.getScoreboard()
+                    .getPlayerScoreInfo(ScoreHolder.forNameOnly("audio_sync_offset"), obj);
+            return info == null ? SYNC_A25_DEFAULT : (int) info.value();
+        } catch (Throwable t) {
+            return SYNC_A25_DEFAULT;
+        }
+    }
+
+    /**
+     * 当前**实际应用**的同步偏移（音乐 ms）。
+     *
+     * ★ 2026-09-21 用户实测标定结论：补偿需求 **不是常数**，而是随速度连续变化、且 1x 归零——
+     *   `-50` 在 0.25x 下正好同步，同值放到 1x 就让音乐明显偏晚 ⇒ 说明所需补偿 ∝ **(1 − speed)**。
+     *   物理上对得上 OLA 时域拉伸的固有相位：输出的「最新窗」对应的源位置比报告位置偏
+     *   (1−speed)·r（r = 窗内偏移），平均即正比于 (1−speed)。
+     *
+     * 因此把计分板 `audio_sync_offset` 的语义定为「**0.25x 下需要的补偿**」，
+     * 实际应用时按 (1−speed)/(1−0.25) 缩放到当前速度：0.25x → 原值、0.5x → 2/3、0.75x → 1/3、1x → 0。
+     * 换设备/换曲若要重新标定，仍只需在 0.25x 下调这一个值。
+     */
+    private static int syncOffsetApplied() {
+        int a = syncOffsetMs();
+        if (a == 0) {
+            return 0;
+        }
+        float f = (1f - speed) / 0.75f;   // 0.25x → 1.0；0.5x → 0.667；1x → 0
+        if (f < 0f) {
+            f = 0f;
+        } else if (f > 2f) {
+            f = 2f;                        // speed < 0.1 之类的极端值：限幅，别把补偿放大到失控
+        }
+        return Math.round(a * f);
+    }
+
+    /**
+     * 对齐被关掉/拿不到播放头时的周期诊断（每 2 秒一行）。
+     *
+     * 为什么需要：标定期会先把自动对齐关掉（否则它会把偏差拉走，读不到“纯偏差”），
+     * 而关掉后 `gamePlayheadMs()` 返回 -1；这里**绕过对齐开关**直接读播放头
+     * （{@link MusicTime#gamePlayhead}/{@link MusicTime#headMs} 不看开关），这样日志里仍有数据可采样。
+     */
+    private static void diagTick(Minecraft mc, int audible) {
+        if (audible < 0) {
+            return;
+        }
+        long now = System.currentTimeMillis();
+        if (now - lastPosLogMs < 2000) {
+            return;
+        }
+        MinecraftServer server = mc.getSingleplayerServer();
+        if (server == null) {
+            return;
+        }
+        int tick = MusicTime.gamePlayhead(server);
+        if (tick == Integer.MIN_VALUE) {
+            return;
+        }
+        lastPosLogMs = now;
+        int phMs = (int) MusicTime.headMs(server, tick);
+        LOGGER.info("[MusicPos] (对齐关) 出声={}ms 播放头={}ms delta={}ms speed={} 偏移={}ms",
+                audible, phMs, audible - phMs, speed, syncOffsetApplied());
+    }
+
+    /**
+     * 游戏播放头毫秒（「音乐对齐游戏」的目标位置）：
+     * 编辑器试听 = maps.editor.playhead；正式游玩 = play_state.time —— 都由
+     * {@link MusicTime#gamePlayheadMs} 从服务端状态读。
+     * **单人**：直接读集成服务端（零延迟）；**多人**：用服务端每刻推送的值
+     * （{@link #setPushedPlayhead}，超过 {@link #PUSHED_HEAD_TTL_MS} 没更新就当失效）；
+     * 都没在跑 / 数据包把对齐开关设为 0 / 音乐尚未开始 → -1（调用方跳过对齐）。
+     */
+    private static int gamePlayheadMs() {
+        try {
+            Minecraft mc = Minecraft.getInstance();
+            MinecraftServer server = mc == null ? null : mc.getSingleplayerServer();
+            if (server != null) {
+                return MusicTime.gamePlayheadMs(server);
+            }
+        } catch (Exception ignored) {
+            // 落到推送值
+        }
+        // ★ ping/2 是**真实毫秒**，播放头是**音乐源毫秒** → 换算后再补偿（慢放同样适用）
+        return System.currentTimeMillis() - pushedHeadAt <= PUSHED_HEAD_TTL_MS
+                ? pushedHeadMs + (int) Math.round(halfPingMs() * (double) speed) : -1;
+    }
+
+    /**
+     * 本机 RTT 的一半（ms，上限 {@link #PUSHED_HEAD_PING_CAP_MS}）：补偿推送值的单程延迟。
+     *
+     * 推送值算的是「服务端发出那一刻」的播放头，包到本地已过约半个 RTT —— 期间游戏时钟也在走，
+     * 所以当前播放头 ≈ 推送值 + RTT/2。ping 拿不到时为 0（退化成不补偿，误差半个 RTT，仍在容忍窗口量级）。
+     */
+    private static int halfPingMs() {
+        try {
+            Minecraft mc = Minecraft.getInstance();
+            if (mc == null || mc.player == null || mc.getConnection() == null) {
+                return 0;
+            }
+            var info = mc.getConnection().getPlayerInfo(mc.player.getUUID());
+            if (info == null) {
+                return 0;
+            }
+            return Math.min(Math.max(0, info.getLatency()) / 2, PUSHED_HEAD_PING_CAP_MS);
         } catch (Exception e) {
-            return -1;
+            return 0;
         }
     }
 
@@ -308,11 +555,24 @@ public class RhythmAxeMusic {
      */
     private static void startWithData(String soundId, PcmData data, int startMs, float newSpeed, float volume) {
         // ★ 起点锚定：包里的 startMs 是「服务端下指令那一刻」算的，等包到客户端已经过了 1~2 刻
-        //   （25~50ms），直接用它起点天然偏早。起播这一瞬现取一次播放头更准（编辑器外拿不到就用原值）。
-        //   偏差过大的情形（如游玩模式音乐有自己的时间轴）不锚定，避免把起点拽到无关位置。
-        int liveMs = editorPlayheadMs();
+        //   （25~50ms），直接用它起点天然偏早。起播这一瞬现取一次播放头更准：
+        //   编辑器试听（playhead 刻）与正式游玩（time 刻，time==0 起播）用的是同一套换算，
+        //   所以两种模式都能锚定；多人拿不到服务端状态（返回 -1）就用原值。
+        //   偏差过大的情形（音乐与游戏播放头本就不在同一时间轴）不锚定，避免把起点拽到无关位置。
+        int liveMs = gamePlayheadMs();
         if (liveMs >= 0 && Math.abs(liveMs - startMs) <= 3000) {
             startMs = liveMs;
+        }
+        // ★ 同步偏移也作用于起播锚点。**符号必须与 alignTick 的约定一致**：
+        //   alignTick 把「报告出声位置」拉到 `播放头 + center`（center 含 offset），
+        //   而这里的 startMs 就是「报告出声位置」的起点 ⇒ 同样要 **加** offset。
+        //   （★ 2026-09-21 修正：原来写成 `startMs - offsetMs`，方向反了 —— offset=−50 时
+        //    报告位置落在播放头**之后** 50ms，配上 OLA 固有提前量 β≈+50 就变成“听到的比播放头早 100ms”，
+        //    于是每次起播/快进快退都要等自动对齐慢慢拽回来，听感正是“音乐一直在自动调整”。）
+        //   这样「播放 / 快进快退（resync 重下 playmusic）/ 暂停→播放」都走同一条对齐好的路径。
+        int offsetMs = syncOffsetApplied();
+        if (offsetMs != 0) {
+            startMs = Math.max(0, startMs + offsetMs);
         }
         pcm = data.pcm;
         channels = data.channels;
@@ -328,7 +588,10 @@ public class RhythmAxeMusic {
         // 定位到 startMs 并填入首批缓冲（OLA 保调变速）
         speed = Math.max(0.05f, Math.min(newSpeed, 1.9f));
         AL10.alSourcef(source, AL10.AL_PITCH, 1f);
-        AL10.alSourcef(source, AL10.AL_GAIN, Math.max(0f, Math.min(volume, 1f)));
+        // ★ 实际增益 = 命令音量 × 游戏内音量设置（见 musicGain()）
+        baseVolume = clamp01(volume);
+        appliedGain = -1f;   // 新一次播放：强制写入一次
+        refreshGain();
         int frameCount = pcm.length / channels;
         double startFrame = Math.min(Math.max(0, startMs) * (double) sampleRate / 1000.0, Math.max(0, frameCount - 1));
         // 输出帧时间轴：源帧 / speed（慢放时输出更长）
@@ -344,6 +607,8 @@ public class RhythmAxeMusic {
         playing = true;
         alignStreak = 0;
         alignCooldown = 0;   // 新一次播放：允许自动对齐从头判定
+        seekResidual = 0;    // 新一次播放：落点残差重新学
+        seekPending = false;
     }
 
     /**
@@ -440,6 +705,8 @@ public class RhythmAxeMusic {
         pcm = null;
         playing = false;
         finished = false;
+        baseVolume = 1f;
+        appliedGain = -1f;
         currentId = null;
         alignStreak = 0;
         alignCooldown = 0;
@@ -460,6 +727,8 @@ public class RhythmAxeMusic {
         if (source == 0 || pcm == null) {
             return;
         }
+        // ★ 跟随游戏内音量设置（玩家拖动「音乐」/「主音量」滑块即时生效）
+        refreshGain();
         // ★ 音频设备切换/资源包重载/重进存档 → MC 重建 AL 上下文 → 旧 source 失效。
         //   检测到即重建并从中断处续播（否则切换播放设备后音乐静默停止，不跟随新设备）。
         if (!AL10.alIsSource(source)) {
@@ -483,7 +752,7 @@ public class RhythmAxeMusic {
             int buf = AL10.alSourceUnqueueBuffers(source);
             queueNext(buf);
         }
-        // 位置诊断/自动对齐日志改由 alignTick() 输出（只在偏差 >40ms 时打印，正常局静默）
+        // 位置诊断/自动对齐日志改由 alignTick() 输出（出窗时每秒一行；对齐关时每 2 秒一行）—— 正常局静默
         // PCM 已全部排入，等最后几个缓冲播完自动停止
         if (finished) {
             int queued = AL10.alGetSourcei(source, AL10.AL_BUFFERS_QUEUED);
@@ -652,6 +921,51 @@ public class RhythmAxeMusic {
         AL10.alSourcei(source, AL10.AL_SOURCE_RELATIVE, AL10.AL_TRUE);
         AL10.alSourcef(source, AL10.AL_GAIN, 1f);
         AL10.alSourcef(source, AL10.AL_PITCH, 1f);
+        appliedGain = -1f;   // 新 source 增益回到 1.0 → 下一次 refreshGain 必须重写
+    }
+
+    // ==================== 音量跟随游戏设置 ====================
+
+    /**
+     * 游戏内音量设置里的**唱片机/音符盒**音量（0~1）= 「唱片机/音符盒」滑块 × 「主音量」滑块。
+     *
+     * ★ 为什么用 RECORDS 而不是 MUSIC（2026-09-21 实测踩坑后改）：谱面音乐是**玩法必需音频**
+     *   （试听/游玩全靠它），而玩家几乎都会把「音乐」关掉来屏蔽原版背景音乐——若跟「音乐」，
+     *   谱面音乐就一起消失了。playmusic 本就归属 **record 通道**（`/stopsound record` 能停它，
+     *   见 SoundManagerMixin），所以音量跟「唱片机/音符盒」最贴切：可单独调、默认 100%、
+     *   且关「音乐」不影响它；关「主音量」仍会全部静音（符合“总音量”直觉）。
+     *
+     * ★ 为什么必须自己乘：本播放器直接用 OpenAL 播放（不走 SoundManager/SoundEngine），
+     *   而原版的音量分类是在 {@code SoundEngine.calculateVolume} 里乘上去的
+     *   （{@code Options.getFinalSoundSourceVolume} = 分类音量 × 主音量；MASTER 自身除外）
+     *   ——我们绕过了那一层，不乘就等于永远满音量：音量拖到 0 也照样出声。
+     *
+     * 音量为 0 时**不停止播放**（alSource 继续推进），只是增益为 0 —— 这样玩家把音量调回来
+     * 就能立刻接着听，而音乐与谱面播放头的对齐关系也不会被破坏。
+     */
+    private static float musicGain() {
+        Minecraft mc = Minecraft.getInstance();
+        if (mc == null || mc.options == null) {
+            return 1f;   // 音量设置拿不到（启动早期等）→ 按满音量，不误静音
+        }
+        return clamp01(mc.options.getFinalSoundSourceVolume(SoundSource.RECORDS));
+    }
+
+    /** 把「命令音量 × 游戏音量设置」写入声卡增益（值没变就不重复调用）。 */
+    private static void refreshGain() {
+        if (source == 0) {
+            return;
+        }
+        float gain = clamp01(baseVolume * musicGain());
+        if (Math.abs(gain - appliedGain) < 0.001f) {
+            return;
+        }
+        appliedGain = gain;
+        AL10.alSourcef(source, AL10.AL_GAIN, gain);
+    }
+
+    private static float clamp01(float v) {
+        return v < 0f ? 0f : (v > 1f ? 1f : v);
     }
 
     /** 惰性创建 OpenAL source 与缓冲。 */

@@ -44,6 +44,10 @@ public class RhythmAxeModClient implements ClientModInitializer {
 				context.client().execute(RhythmAxeMusic::resume));
 		ClientPlayNetworking.registerGlobalReceiver(MusicPayloads.StopPayload.TYPE, (payload, context) ->
 				context.client().execute(RhythmAxeMusic::stop));
+		// 服务端推送的游戏播放头（每刻一个）：多人下「音乐对齐游戏」的目标位置
+		ClientPlayNetworking.registerGlobalReceiver(MusicPayloads.HeadPayload.TYPE, (payload, context) ->
+				context.client().execute(() ->
+						RhythmAxeMusic.setPushedPlayhead(payload.playheadMs(), payload.valid())));
 
 		// 编辑器可视化时间轴：接收窗口数据 → 更新 HUD 覆盖层；开关关闭/退出编辑器时隐藏
 		ClientPlayNetworking.registerGlobalReceiver(TimelinePayloads.ShowPayload.TYPE, (payload, context) ->

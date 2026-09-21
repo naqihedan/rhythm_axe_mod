@@ -22,9 +22,15 @@ import net.minecraft.world.scores.ScoreHolder;
  *
  * storage 读取用 26.1 公开 API MinecraftServer.getCommandStorage()，无需 mixin。
  * 任何存储异常/数据缺失都静默回退到 mspt，保证 playmusic 永远可用。
+ *
+ * 另：{@link #gamePlayheadMs} 给「音乐对齐游戏」提供游戏播放头毫秒
+ * （编辑器试听 = maps.editor.playhead；正式游玩 = play_state.time），见《设置.md》对齐开关。
  */
 public final class MusicTime {
 	private static final Identifier EDITOR_STORAGE = Identifier.parse("rhythm_axe:maps.editor");
+	/** 游玩的运行存储（开局从谱面拷贝，含 timing_points）与计分板（time = 音乐时间轴刻） */
+	private static final Identifier RUNTIME_STORAGE = Identifier.parse("rhythm_axe:runtime");
+	private static final String PLAY_OBJECTIVE = "play_state";
 	private static final double MAX_MS = 2_000_000_000.0;
 
 	private MusicTime() {
@@ -65,56 +71,134 @@ public final class MusicTime {
 	}
 
 	/**
-	 * 编辑器播放头对应的毫秒（供「音乐对齐游戏」用）。
+	 * **游戏播放头毫秒**（「音乐对齐游戏」的目标位置）：
+	 * - 正在编辑谱面（maps.editor.active=1）→ 编辑器播放头（playhead 刻），时间点取编辑工作副本；
+	 * - 正在游玩谱面（play_state.is_running=1）→ 歌曲时间轴（play_state.time 刻），
+	 *   时间点取运行存储 {@code rhythm_axe:runtime.timing_points}（开局从谱面拷贝，与 tick rate 同源）；
+	 * - 都不在 / 对齐开关关闭 / 音乐尚未开始（time&lt;0）/ 读取异常 → 返回 -1（调用方跳过对齐）。
 	 *
-	 * 未打开编辑器 / 读取异常 / 自动对齐被关掉 → 返回 -1（调用方跳过对齐）。
-	 * 开关 = options 计分板 {@code editor_audio_align}（0=关，缺失或其它值=开，见《设置.md》）。
+	 * 开关 = options 计分板 {@code editor_audio_align} / {@code play_audio_align}
+	 * （0=关，缺失或其它值=开，见《设置.md》）。
 	 */
-	public static int editorPlayheadMs(MinecraftServer server) {
+	public static int gamePlayheadMs(MinecraftServer server) {
 		try {
-			CompoundTag editor = server.getCommandStorage().get(EDITOR_STORAGE);
-			if (editor == null || !editor.getBooleanOr("active", false)) {
+			boolean editing = editorActive(server);
+			if (!optionEnabled(server, editing ? "editor_audio_align" : "play_audio_align")) {
 				return -1;
 			}
-			if (!audioAlignEnabled(server)) {
-				return -1;
+			int tick = editing ? editorPlayheadTick(server) : playTick(server);
+			if (tick < 0) {
+				return -1;   // 游玩：time<0 表示音乐还没开始，没有可对齐的目标
 			}
-			double ms = msAtTick(server, editor.getIntOr("playhead", 0));
-			return (int) Math.min(ms, MAX_MS);
+			return clampMs(headMs(server, tick));
 		} catch (Exception ignored) {
 			return -1;
 		}
 	}
 
-	/** 自动对齐开关：options 计分板 editor_audio_align（0=关；缺失或 options 未初始化=开）。 */
-	private static boolean audioAlignEnabled(MinecraftServer server) {
+	/**
+	 * 游戏播放头（刻）—— 编辑器播放头优先，其次游玩歌曲时间轴（{@code play_state.time}）；
+	 * 都没有返回 {@link Integer#MIN_VALUE}。供诊断日志用（游玩的 time 可能为负 = 音乐尚未开始）。
+	 */
+	public static int gamePlayhead(MinecraftServer server) {
+		if (editorActive(server)) {
+			return editorPlayheadTick(server);
+		}
+		return playTick(server);
+	}
+
+	/**
+	 * 播放头刻 → 毫秒（按当前处于编辑器还是游玩自动选时间点来源，忽略对齐开关）。
+	 * 诊断日志用；对齐目标请走 {@link #gamePlayheadMs}。
+	 */
+	public static double headMs(MinecraftServer server, int tick) {
+		return editorActive(server) ? msAtTick(server, tick) : playMsAtTick(server, tick);
+	}
+
+	/** 是否正在编辑谱面（maps.editor.active）。 */
+	private static boolean editorActive(MinecraftServer server) {
+		try {
+			CompoundTag editor = server.getCommandStorage().get(EDITOR_STORAGE);
+			return editor != null && editor.getBooleanOr("active", false);
+		} catch (Exception ignored) {
+			return false;
+		}
+	}
+
+	/** 编辑器播放头（刻）。 */
+	private static int editorPlayheadTick(MinecraftServer server) {
+		try {
+			CompoundTag editor = server.getCommandStorage().get(EDITOR_STORAGE);
+			return editor == null ? 0 : editor.getIntOr("playhead", 0);
+		} catch (Exception ignored) {
+			return 0;
+		}
+	}
+
+	/**
+	 * 游玩歌曲时间轴的当前刻（{@code play_state.time}）。
+	 * 未在游玩（is_running≠1）/ 读取异常 → {@link Integer#MIN_VALUE}。
+	 * 注意刻可以是负数（time 起点 = min(0, 最早出生) - 1），音乐起点是 time==0。
+	 */
+	private static int playTick(MinecraftServer server) {
+		try {
+			Objective obj = server.getScoreboard().getObjective(PLAY_OBJECTIVE);
+			if (obj == null) {
+				return Integer.MIN_VALUE;
+			}
+			ReadOnlyScoreInfo running = server.getScoreboard()
+					.getPlayerScoreInfo(ScoreHolder.forNameOnly("is_running"), obj);
+			if (running == null || running.value() != 1) {
+				return Integer.MIN_VALUE;
+			}
+			ReadOnlyScoreInfo time = server.getScoreboard()
+					.getPlayerScoreInfo(ScoreHolder.forNameOnly("time"), obj);
+			return time == null ? Integer.MIN_VALUE : time.value();
+		} catch (Exception ignored) {
+			return Integer.MIN_VALUE;
+		}
+	}
+
+	/**
+	 * 游玩刻→毫秒：时间点取运行存储 {@code rhythm_axe:runtime.timing_points}（与 tick rate 同源）；
+	 * 无时间点 / 数据异常 → 回退 tick×当前 mspt。
+	 */
+	private static double playMsAtTick(MinecraftServer server, int tick) {
+		try {
+			CompoundTag runtime = server.getCommandStorage().get(RUNTIME_STORAGE);
+			if (runtime != null) {
+				Optional<ListTag> tps = runtime.getList("timing_points");
+				if (tps.isPresent() && !tps.get().isEmpty()) {
+					double ms = piecewise(tps.get(), tick);
+					if (ms >= 0) {
+						return ms;
+					}
+				}
+			}
+		} catch (Exception ignored) {
+			// 回退 mspt
+		}
+		return tick * server.tickRateManager().millisecondsPerTick();
+	}
+
+	/** 对齐开关：options 计分板 &lt;holder&gt;（0=关；缺失或 options 未初始化=开）。 */
+	private static boolean optionEnabled(MinecraftServer server, String holder) {
 		try {
 			Objective obj = server.getScoreboard().getObjective("options");
 			if (obj == null) {
 				return true;
 			}
 			ReadOnlyScoreInfo info = server.getScoreboard()
-					.getPlayerScoreInfo(ScoreHolder.forNameOnly("editor_audio_align"), obj);
+					.getPlayerScoreInfo(ScoreHolder.forNameOnly(holder), obj);
 			return info == null || info.value() != 0;
 		} catch (Exception e) {
 			return true;
 		}
 	}
 
-	/**
-	 * 编辑器当前播放头（刻）。未打开编辑器/读取异常返回 {@link Integer#MIN_VALUE}。
-	 * （诊断与「音乐驱动播放头」用；与 convert 读同一份 storage）
-	 */
-	public static int editorPlayhead(MinecraftServer server) {
-		try {
-			CompoundTag editor = server.getCommandStorage().get(EDITOR_STORAGE);
-			if (editor != null && editor.getBooleanOr("active", false)) {
-				return editor.getIntOr("playhead", 0);
-			}
-		} catch (Exception ignored) {
-			// 存储异常 → 视作未打开
-		}
-		return Integer.MIN_VALUE;
+	/** 毫秒钳到 int 安全范围。 */
+	private static int clampMs(double ms) {
+		return (int) Math.min(ms, MAX_MS);
 	}
 
 	/**

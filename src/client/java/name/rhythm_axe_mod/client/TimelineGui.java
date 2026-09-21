@@ -68,9 +68,19 @@ public final class TimelineGui implements HudElement {
 	// 闲置淡出：10 秒无变化则整体透明度减半，逐渐过渡
 	private static volatile float alpha = 1f;
 	private static long lastActivity;
-	// 平滑运动：客户端插值播放头（float），内容随显示播放头平滑滚动，而非每 tick 跳变
+	// 播放头显示位置（float 刻）：两种驱动方式，见 extractRenderState 里的「播放头显示位置」一节
+	//   ① 播放中：按本帧游戏刻推进（线性、匀速）
+	//   ② 暂停中 / 播放头整段跳变（快进快退、跳转、seek）：指数插值滑行
 	private static volatile float displayPlayhead;
 	private static boolean displayInitialized;
+	/** 播放中偏差的**正常带宽**（刻）：显示位置天然领先最近一次服务端值 0~1 刻（阶梯 vs 匀速），带宽内不回拉 */
+	private static final float PLAYHEAD_DEAD_BAND = 1.2f;
+	/** 播放中「播放头整段跳变」的判定阈值（刻）：超过它必是快进快退/跳转，改走指数滑行 */
+	private static final float PLAYHEAD_JUMP_TICKS = 2.5f;
+	/** 超出正常带宽后的回拉系数（每帧）：只在真出问题时生效（掉帧/刻率切换/丢包），不会带来常驻的速度抖动 */
+	private static final float PLAYHEAD_PULL = 0.02f;
+	/** 暂停 / 跳变时的指数插值系数（每帧）：0.15 ≈ 110ms 内到位，跟手且不跳变 */
+	private static final float PLAYHEAD_GLIDE = 0.15f;
 	private static int lastSentLen;
 
 	// 16 染料色（color 1-16；混凝土默认 9、玻璃默认 6）
@@ -103,7 +113,7 @@ public final class TimelineGui implements HudElement {
 		data = payload;
 		visible = true;
 		lastActivity = System.currentTimeMillis();
-		// 首次收到 → 直接对齐；之后无论播放/暂停(快进快退/seek)都交由渲染插值平滑过渡
+		// 首次收到 → 直接对齐；之后播放中按刻线性推进、暂停/跳变时指数滑行（见 extractRenderState）
 		if (!displayInitialized) {
 			displayPlayhead = payload.playhead();
 			displayInitialized = true;
@@ -205,12 +215,29 @@ public final class TimelineGui implements HudElement {
 		int rightW = font.width(right);
 		graphics.text(font, right, x2 - rightW - 2, top + 1, withAlpha(0xFFFFFFFF, alpha));
 
-		// 平滑运动：无论播放还是暂停(快进/快退/seek)，都在服务端 playhead 之间做插值；仅首次初始化直接对齐
-		if (displayInitialized) {
-			displayPlayhead += (d.playhead() - displayPlayhead) * 0.15f;
-		} else {
+		// ── 播放头显示位置 ──
+		// 服务端每刻才推一次播放头（**阶梯值**），0.25x 下要 200ms 才跳一格。若只靠「每帧向这个阶梯值
+		// 指数逼近」，速度就会在「刚跳完（快）」与「快跳下一格（慢）」之间来回变（摆幅≈±100%）——看着就是一顿一顿。
+		// 而播放头每刻固定走 **1 刻**（慢放是靠 tick rate 实现的，不是靠每刻多走，见数据包 advance_），
+		// 所以直接按「本帧走了几个游戏刻」线性推进即可：与帧率、tick rate、播放速度全都无关，恒定匀速。
+		//
+		//   ① 播放中且偏差在**正常带宽**内 → 纯线性推进（零速度抖动；刻内也平滑，不局限在整刻上跳）
+		//   ② 播放中但偏差超出带宽 → 额外回拉（吸收掉帧/刻率切换/丢包造成的偏移，限幅到带宽边缘，不振荡）
+		//   ③ 暂停中，或偏差大到只可能是**快进快退/跳转/seek** → 保持原来的指数滑行（跟手、不跳变）
+		if (!displayInitialized) {
 			displayPlayhead = d.playhead();
 			displayInitialized = true;
+		} else {
+			float err = d.playhead() - displayPlayhead;
+			if (!d.playing() || Math.abs(err) > PLAYHEAD_JUMP_TICKS) {
+				displayPlayhead += err * PLAYHEAD_GLIDE;
+			} else {
+				displayPlayhead += deltaTracker.getGameTimeDeltaTicks();
+				float over = Math.abs(err) - PLAYHEAD_DEAD_BAND;
+				if (over > 0f) {
+					displayPlayhead += Math.signum(err) * over * PLAYHEAD_PULL;
+				}
+			}
 		}
 
 		// ── 节奏染色刻度：按时间点分段（每段用各自 tpb/bpb 画小节线；时间点存在即新小节起点） ──
@@ -313,6 +340,11 @@ public final class TimelineGui implements HudElement {
 		//       方向由 min/max 决定 —— 第二次点的刻比第一次早时两边自动翻过来，始终把范围夹在中间
 		boolean hasIn = d.rangeInSet();
 		boolean hasOut = d.rangeOutSet();
+		// ★ 刚设入点、还没拉出范围（出入点同刻）时：当作「只有入点」画 —— 否则两个括号重叠在同一刻，
+		//   看起来像「出点已经被定下了」。播放头拉出去后（或定下出点）自然就画出点与色带。
+		if (hasIn && hasOut && d.rangeIn() == d.rangeOut()) {
+			hasOut = false;
+		}
 		if (hasIn || hasOut) {
 			int rangeLo = (hasIn && hasOut) ? Math.min(d.rangeIn(), d.rangeOut()) : (hasIn ? d.rangeIn() : d.rangeOut());
 			int rangeHi = (hasIn && hasOut) ? Math.max(d.rangeIn(), d.rangeOut()) : (hasIn ? d.rangeIn() : d.rangeOut());

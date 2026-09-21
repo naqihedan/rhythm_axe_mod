@@ -73,6 +73,27 @@ public final class MusicPayloads {
 	}
 
 	/**
+	 * 服务端→客户端：**游戏播放头**（毫秒）—— 「音乐对齐游戏」的目标位置。
+	 *
+	 * 播放头在服务端（编辑器 = maps.editor.playhead；游玩 = play_state.time + runtime.timing_points），
+	 * 单人时客户端直接读集成服务端（零延迟）；**多人**下客户端拿不到服务端 storage，
+	 * 就靠服务端每刻推送这个包（只发给收过 /playmusic 的玩家）。
+	 * valid=false 表示当前没有可对齐的播放头（不在编辑/游玩中、对齐开关关闭、读取异常）→ 客户端跳过对齐。
+	 */
+	public record HeadPayload(int playheadMs, boolean valid) implements CustomPacketPayload {
+		public static final Type<HeadPayload> TYPE = new Type<>(Identifier.parse("rhythm_axe_mod:music_head"));
+		public static final StreamCodec<ByteBuf, HeadPayload> STREAM_CODEC = StreamCodec.composite(
+				ByteBufCodecs.VAR_INT, HeadPayload::playheadMs,
+				ByteBufCodecs.BOOL, HeadPayload::valid,
+				HeadPayload::new);
+
+		@Override
+		public Type<? extends CustomPacketPayload> type() {
+			return TYPE;
+		}
+	}
+
+	/**
 	 * 客户端→服务端：音乐实际播放位置（诊断用，也为后续「音乐驱动播放头」预留）。
 	 *
 	 * audibleMs = 真正**出声**的位置（当前缓冲内偏移 + 已播完缓冲换算），单位毫秒（源时间轴）；
