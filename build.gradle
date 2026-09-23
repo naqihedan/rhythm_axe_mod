@@ -50,7 +50,7 @@ processResources {
 // mod 本体由开发类路径提供，勿在 mods 文件夹里放 rhythm_axe_mod/fabric-api 的 jar（dev_client.ps1 会自动处理）。
 tasks.named('runClient', JavaExec) {
 	jvmArgs '-Xmx4G'
-	args '--gameDir', 'D:\\Program Files (x86)\\Minecrafts\\PCL 正式版 2.10.3 (1)\\.minecraft\\versions\\节奏地图 高版本重制版'
+	args '--gameDir', 'D:\\Program Files (x86)\\Minecrafts\\PCL 正式版 2.10.3 (1)\\.minecraft\\versions\\26.2-Fabric 0.19.5 Rhythm_Axe'
 }
 
 tasks.withType(JavaCompile).configureEach {

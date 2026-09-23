@@ -155,7 +155,7 @@
 
 ### 📦 需求
 
-1. Minecraft 26.1.2
-2. 安装 [Fabric Loader](https://fabricmc.net/use/) ≥ 0.19.2
-3. 需要 [Fabric API](https://modrinth.com/mod/fabric-api) ≥ 0.149.0
+1. Minecraft 26.2
+2. 安装 [Fabric Loader](https://fabricmc.net/use/) ≥ 0.19.5
+3. 需要 [Fabric API](https://modrinth.com/mod/fabric-api) ≥ 0.160.0
 4. 需要 Java 25 或更高版本

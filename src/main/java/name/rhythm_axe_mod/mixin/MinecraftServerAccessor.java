@@ -14,7 +14,7 @@ public interface MinecraftServerAccessor {
     /**
      * 下一 tick 的预期开始时间（纳秒时间戳，配合 System.nanoTime()）。
      * 服务器主循环用此值与当前时间比较来决定是否开始新 tick。
-     * 在 Minecraft 26.1 (Mojang mapping) 中此字段名为 nextTickTimeNanos。
+     * 在 Minecraft 26.x (Mojang mapping) 中此字段名为 nextTickTimeNanos。
      */
     @Accessor("nextTickTimeNanos")
     long getNextTickTimeNanos();

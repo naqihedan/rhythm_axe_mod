@@ -37,7 +37,7 @@ import net.minecraft.world.scores.ScoreHolder;
  * 演奏音乐播放器（阶段0，多人版）：**编辑器试听**与**正式游玩**共用同一条播放路径
  * （都由数据包 /playmusic 驱动，见《游玩谱面.md》音乐播放）。
  *
- * 思路：MC 26.1 的 JOrbisAudioStream 是纯顺序解码、没有 seek 接口，
+ * 思路：MC 26.x 的 JOrbisAudioStream 是纯顺序解码、没有 seek 接口，
  * 因此播放时把整首 OGG 一次性解码成 16bit PCM 存入内存，
  * 再通过 OpenAL 的队列缓冲流式喂给声卡；跳转 = 移动输出游标 + 重新排队。
  *

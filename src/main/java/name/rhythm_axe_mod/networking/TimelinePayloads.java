@@ -20,7 +20,7 @@ public final class TimelinePayloads {
 	private TimelinePayloads() {
 	}
 
-	/** 变长 List 的 StreamCodec（26.1 ByteBufCodecs 无 list(StreamCodec)，手写编码：先写长度再逐个元素）。 */
+	/** 变长 List 的 StreamCodec（26.x ByteBufCodecs 无 list(StreamCodec)，手写编码：先写长度再逐个元素）。 */
 	private static <T> StreamCodec<ByteBuf, List<T>> listOf(StreamCodec<ByteBuf, T> element) {
 		return StreamCodec.of(
 				(buf, list) -> {

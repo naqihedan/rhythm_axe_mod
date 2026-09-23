@@ -193,7 +193,7 @@ public final class TimelineSync {
 		}
 	}
 
-	/** NBT float 安全读取（26.1 getFloat 返回 Optional<Float>）。 */
+	/** NBT float 安全读取（26.x getFloat 返回 Optional<Float>）。 */
 	private static float f(CompoundTag tag, String key, float def) {
 		return tag.getFloat(key).orElse(def);
 	}
@@ -535,7 +535,7 @@ public final class TimelineSync {
 				return null;
 			}
 			// 数据包 `data modify ... player set from entity @s UUID` 存的是 UUID 的 int-array [I;...]，
-			// 不是字符串！必须用 getIntArray 读四个 int，再拼成 UUID（26.1 返回 Optional<int[]>）。
+			// 不是字符串！必须用 getIntArray 读四个 int，再拼成 UUID（26.x 返回 Optional<int[]>）。
 			int[] id = editor.getIntArray("player").orElse(new int[0]);
 			if (id.length != 4) {
 				return null;

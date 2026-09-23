@@ -96,7 +96,7 @@ public class TickCommandMixin {
 
     /**
      * 尝试通过反射找到服务器内部计时字段(nextTickTime)并调整。
-     * Minecraft 26.1 中该字段可能存在于 MinecraftServer 或 TickRateManager。
+     * Minecraft 26.x 中该字段可能存在于 MinecraftServer 或 TickRateManager。
      * 若找不到匹配字段则静默跳过，不影响正常功能。
      */
     private static boolean timingFieldFound = false;

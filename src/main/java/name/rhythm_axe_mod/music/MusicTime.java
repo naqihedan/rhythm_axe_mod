@@ -20,7 +20,7 @@ import net.minecraft.world.scores.ScoreHolder;
  *    timing_points 非空 → 按时间点分段换算（BPM 可变，每刻毫秒 = 60000/(bpm×tpb)）；
  * 2. 否则回退：ms = tick × 当前服务端 mspt（未编辑时 20tps → 1tick=50ms）。
  *
- * storage 读取用 26.1 公开 API MinecraftServer.getCommandStorage()，无需 mixin。
+ * storage 读取用 26.x 公开 API MinecraftServer.getCommandStorage()，无需 mixin。
  * 任何存储异常/数据缺失都静默回退到 mspt，保证 playmusic 永远可用。
  *
  * 另：{@link #gamePlayheadMs} 给「音乐对齐游戏」提供游戏播放头毫秒
