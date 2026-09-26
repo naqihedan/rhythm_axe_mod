@@ -223,10 +223,17 @@ public final class TimelineGui implements HudElement {
 		//
 		//   ① 播放中且偏差在**正常带宽**内 → 纯线性推进（零速度抖动；刻内也平滑，不局限在整刻上跳）
 		//   ② 播放中但偏差超出带宽 → 额外回拉（吸收掉帧/刻率切换/丢包造成的偏移，限幅到带宽边缘，不振荡）
-		//   ③ 暂停中，或偏差大到只可能是**快进快退/跳转/seek** → 保持原来的指数滑行（跟手、不跳变）
+		//   ③ 编辑器暂停（playing=0），或偏差大到只可能是**快进快退/跳转/seek** → 指数滑行（跟手、不跳变）
+		//   ④ 游戏暂停（单人按 Esc）→ 显示位置**整体冻结**
+		//      服务端刻停住 ⇒ 不再推播放头，音乐也被 mod 一并暂停；但本帧仍在渲染，
+		//      若继续按 ① 线性推进，就会与冻住的服务端值互相拉扯（推进 ↔ 回拉 ↔ 指数滑行）→ 看着就是抽搐。
+		//      恢复后无需特殊处理：暂停期间两边都没动，差值仍在带宽内，直接续上匀速。
+		boolean gamePaused = mc.isPaused();
 		if (!displayInitialized) {
 			displayPlayhead = d.playhead();
 			displayInitialized = true;
+		} else if (gamePaused) {
+			// 冻结：不推进、不回拉、不滑行（保持暂停瞬间的显示位置）
 		} else {
 			float err = d.playhead() - displayPlayhead;
 			if (!d.playing() || Math.abs(err) > PLAYHEAD_JUMP_TICKS) {
