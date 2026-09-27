@@ -41,6 +41,9 @@ import net.minecraft.world.scores.ScoreHolder;
 public final class TimelineSync {
 	private static final Identifier EDITOR_STORAGE = Identifier.parse("rhythm_axe:maps.editor");
 
+	/** 编辑者 tag：数据包侧 editor/coop/join 打上、leave/exit 摘掉；时间轴 HUD 的推送目标 = 所有带它的人。 */
+	private static final String EDITOR_TAG = "editor_active";
+
 	// 上次推送状态（变化检测）
 	private static boolean initialized;
 	private static int lastPlayhead;
@@ -519,10 +522,24 @@ public final class TimelineSync {
 		return out;
 	}
 
+	/**
+	 * 推给**所有编辑者**（带 {@link #EDITOR_TAG} 的人），而不是只推 maps.editor.player 那一个人：
+	 * 多人协作下（见编辑器.md《多人协作》）每个协作成员都要看到同一个时间轴。
+	 * 没有任何人带 tag 时（老数据包 / tag 丢失）退回「按 maps.editor.player 单人推送」，保持兼容。
+	 */
 	private static void sendShow(MinecraftServer server, ShowPayload payload) {
-		ServerPlayer target = editorPlayer(server);
-		if (target != null) {
-			ServerPlayNetworking.send(target, payload);
+		boolean any = false;
+		for (ServerPlayer player : server.getPlayerList().getPlayers()) {
+			if (player.entityTags().contains(EDITOR_TAG)) {
+				ServerPlayNetworking.send(player, payload);
+				any = true;
+			}
+		}
+		if (!any) {
+			ServerPlayer fallback = editorPlayer(server);
+			if (fallback != null) {
+				ServerPlayNetworking.send(fallback, payload);
+			}
 		}
 	}
 

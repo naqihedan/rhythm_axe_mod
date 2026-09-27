@@ -15,6 +15,7 @@ import com.mojang.brigadier.exceptions.SimpleCommandExceptionType;
 
 import name.rhythm_axe_mod.music.MusicTime;
 import name.rhythm_axe_mod.networking.MusicPayloads;
+import name.rhythm_axe_mod.networking.TickratePayloads;
 import name.rhythm_axe_mod.networking.TimelinePayloads;
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
@@ -61,6 +62,8 @@ public class RhythmAxeMod implements ModInitializer {
 		PayloadTypeRegistry.clientboundPlay().register(MusicPayloads.HeadPayload.TYPE, MusicPayloads.HeadPayload.STREAM_CODEC);
 		PayloadTypeRegistry.clientboundPlay().register(TimelinePayloads.ShowPayload.TYPE, TimelinePayloads.ShowPayload.STREAM_CODEC);
 		PayloadTypeRegistry.clientboundPlay().register(TimelinePayloads.HidePayload.TYPE, TimelinePayloads.HidePayload.STREAM_CODEC);
+		// 客户端 tick rate 同步（多人）：原版只同步「变慢」，加速靠本 mod 客户端侧，必须自行下发
+		PayloadTypeRegistry.clientboundPlay().register(TickratePayloads.TickratePayload.TYPE, TickratePayloads.TickratePayload.STREAM_CODEC);
 		// 客户端→服务端：上报时间轴显示区间长度（服务端按此窗口裁剪推送数据）
 		PayloadTypeRegistry.serverboundPlay().register(TimelinePayloads.ClientWindowPayload.TYPE, TimelinePayloads.ClientWindowPayload.STREAM_CODEC);
 		ServerPlayNetworking.registerGlobalReceiver(TimelinePayloads.ClientWindowPayload.TYPE, (payload, context) ->
@@ -108,6 +111,12 @@ public class RhythmAxeMod implements ModInitializer {
 
 		// 「音乐对齐游戏」多人支持：每刻把游戏播放头推给收过 /playmusic 的玩家
 		registerMusicHeadPush();
+
+		// 「客户端 tick rate」多人支持：玩家加入时补发当前速率（速率变动时由 TickrateSync.broadcast 广播）
+		TickrateSync.registerJoinSync();
+
+		// 【已搁置 2026-09-26】「逐玩家判定延迟补偿」（PlayerPingSync → 计分板 net）：实测「无明显收益、
+		//   手感反而更飘」⇒ 已回退（类已删）。要恢复：加回 PlayerPingSync.java + 这两行；详见数据包文档 todo.md。
 	}
 
 	// ── 音乐播放指令（文档《工具组件.md》：/playmusic /pausemusic /resumemusic） ──
@@ -296,7 +305,7 @@ public class RhythmAxeMod implements ModInitializer {
 				source.sendSuccess(() -> Component.literal("  §7单人直接读服务端；多人由服务端每刻推送播放头（music_head 包）"), false);
 				source.sendSuccess(() -> Component.literal(""), false);
 				source.sendSuccess(() -> Component.literal("§e权限等级：§f/tick 已降为 2 级，音乐指令为 2 级"), false);
-				source.sendSuccess(() -> Component.literal("§e客户端同步：§f速率 > 20 tps 时自动加速渲染"), false);
+				source.sendSuccess(() -> Component.literal("§e客户端同步：§f速率 > 20 tps 时自动加速渲染（多人会下发给所有客户端，后进的也会补发）"), false);
 				source.sendSuccess(() -> Component.literal("§e切换世界：§f自动重置为 20 tps"), false);
 				source.sendSuccess(() -> Component.literal("§e命令确认弹窗：§f由 gamerule rhythm_axe_mod:confirm_command 控制（默认true=原版确认，false=跳过）"), false);
 				source.sendSuccess(() -> Component.literal("§6========================================"), false);

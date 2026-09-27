@@ -1,6 +1,8 @@
 package name.rhythm_axe_mod.client;
 
+import name.rhythm_axe_mod.TickrateState;
 import name.rhythm_axe_mod.networking.MusicPayloads;
+import name.rhythm_axe_mod.networking.TickratePayloads;
 import name.rhythm_axe_mod.networking.TimelinePayloads;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
@@ -54,6 +56,9 @@ public class RhythmAxeModClient implements ClientModInitializer {
 				context.client().execute(() -> TimelineGui.show(payload)));
 		ClientPlayNetworking.registerGlobalReceiver(TimelinePayloads.HidePayload.TYPE, (payload, context) ->
 				context.client().execute(TimelineGui::hide));
+		// 客户端 tick rate（多人）：服务端下发「本客户端应使用的速率」→ 驱动 DeltaTrackerTimerMixin 变速
+		ClientPlayNetworking.registerGlobalReceiver(TickratePayloads.TickratePayload.TYPE, (payload, context) ->
+				context.client().execute(() -> TickrateState.setClientTickRate(payload.clientRate())));
 		HudElementRegistry.attachElementAfter(VanillaHudElements.BOSS_BAR,
 				Identifier.parse("rhythm_axe_mod:editor_timeline"), new TimelineGui());
 	}

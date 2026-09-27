@@ -81,6 +81,13 @@ public final class TimelineGui implements HudElement {
 	private static final float PLAYHEAD_PULL = 0.02f;
 	/** 暂停 / 跳变时的指数插值系数（每帧）：0.15 ≈ 110ms 内到位，跟手且不跳变 */
 	private static final float PLAYHEAD_GLIDE = 0.15f;
+	/**
+	 * ★ 单帧线性推进上限（刻，2026-09-26）：卡帧会让 {@code getGameTimeDeltaTicks()} 突增到 5~10 刻
+	 * ⇒ 一步就没超过 PLAYHEAD_JUMP_TICKS（2.5）⇒ 下一帧 |err| 直接掉进「指数滑行」分支
+	 * ⇒ 变成「大步前进 ↔ 回拉滑行」来回拉扯 = 肉眼可见的掉搐。
+	 * 正常帧 ≈0.3~1.0 刻（20~60fps），限幅只挡卡帧尖峰，不影响匀速表现。
+	 */
+	private static final float PLAYHEAD_MAX_STEP = 2.0f;
 	private static int lastSentLen;
 
 	// 16 染料色（color 1-16；混凝土默认 9、玻璃默认 6）
@@ -239,7 +246,9 @@ public final class TimelineGui implements HudElement {
 			if (!d.playing() || Math.abs(err) > PLAYHEAD_JUMP_TICKS) {
 				displayPlayhead += err * PLAYHEAD_GLIDE;
 			} else {
-				displayPlayhead += deltaTracker.getGameTimeDeltaTicks();
+				// ★ 2026-09-26：单帧推进限幅 —— 挡卡帧尖峰（例：点聊天栏按钮时 consume 额外播一声
+				//   ui.button.click，掉帧让 gameTimeDeltaTicks 突增；工具路径不播声所以感觉不抽）。
+				displayPlayhead += Math.min(deltaTracker.getGameTimeDeltaTicks(), PLAYHEAD_MAX_STEP);
 				float over = Math.abs(err) - PLAYHEAD_DEAD_BAND;
 				if (over > 0f) {
 					displayPlayhead += Math.signum(err) * over * PLAYHEAD_PULL;

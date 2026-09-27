@@ -27,6 +27,7 @@ import java.util.Map;
 
 import name.rhythm_axe_mod.RhythmAxeMod;
 import name.rhythm_axe_mod.TickrateState;
+import name.rhythm_axe_mod.TickrateSync;
 
 @Mixin(TickCommand.class)
 public class TickCommandMixin {
@@ -61,9 +62,21 @@ public class TickCommandMixin {
     @Inject(method = "setTickingRate(Lnet/minecraft/commands/CommandSourceStack;F)I",
             at = @At("RETURN"))
     private static void afterSetTickingRate(CommandSourceStack source, float rate, CallbackInfoReturnable<Integer> cir) {
-        TickrateState.setClientTickRate(rate);
+        applyClientRate(source, rate, true);
         // 通过 Accessor 立即调整计时字段（纳秒精度）
         adjustTimingDirectly(source);
+    }
+
+    /**
+     * 应用客户端速率：本机客户端（集成服务端 = 房主）直接改状态，其它客户端靠网络包同步。
+     *
+     * <p>多人下这一步是必需的 —— 客户端是独立进程，原版只同步「变慢」到 20tps 上限，
+     * 加速（&gt;20tps）完全靠本 mod 客户端侧读 {@link TickrateState}，不发包就永远只有房主变速。
+     */
+    private static void applyClientRate(CommandSourceStack source, float rate, boolean sync) {
+        float clientRate = sync ? rate : 20.0f;
+        TickrateState.setClientTickRate(clientRate);
+        TickrateSync.broadcast(source.getServer(), clientRate);
     }
 
     /**
@@ -268,11 +281,7 @@ public class TickCommandMixin {
         adjustTimingDirectly(source);
 
         source.sendSuccess(() -> Component.literal(feedback), true);
-        if (sync) {
-            TickrateState.setClientTickRate(rate);
-        } else {
-            TickrateState.setClientTickRate(20.0f);
-        }
+        applyClientRate(source, rate, sync);
         return (int) rate;
     }
 
@@ -315,11 +324,7 @@ public class TickCommandMixin {
         adjustTimingDirectly(source);
 
         source.sendSuccess(() -> Component.literal(feedback), true);
-        if (sync) {
-            TickrateState.setClientTickRate(rate);
-        } else {
-            TickrateState.setClientTickRate(20.0f);
-        }
+        applyClientRate(source, rate, sync);
         return (int) rate;
     }
 
