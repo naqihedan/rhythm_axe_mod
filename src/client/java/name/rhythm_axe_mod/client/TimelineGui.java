@@ -152,6 +152,29 @@ public final class TimelineGui implements HudElement {
 		return DYE_UNSET;
 	}
 
+	/**
+	 * 毫秒 →「分:秒.毫秒」（负数当 0；如 0:12.345 / 1:23.456）。时间轴顶部信息行显示音乐进度用。
+	 */
+	private static String fmtMs(int ms) {
+		int v = Math.max(ms, 0);
+		return String.format("%d:%02d.%03d", v / 60000, (v / 1000) % 60, v % 1000);
+	}
+
+	/**
+	 * 音乐播放进度（当前 / 总长，都是「分:秒.毫秒」）。
+	 * <p>
+	 * 都是**编辑器口径**：刻 → 毫秒按工作副本时间点分段（每刻 = 60000/(bpm×tpb) ms），由服务端算好放进 payload。
+	 * 1 刻 ≠ 50ms —— 编辑器内 tick rate 随时间点变；大厅预览那种「固定 50ms/刻」是另一个口径，别混。
+	 * 当前值优先用客户端真正出声的位置（{@link RhythmAxeMusic#audibleMs()}）；没在播时退化为服务端播放头毫秒。
+	 */
+	private static String musicProgress(ShowPayload d) {
+		int curMs = RhythmAxeMusic.audibleMs();
+		if (curMs < 0) {
+			curMs = Math.max(d.headMs(), 0);
+		}
+		return fmtMs(curMs) + "/" + (d.endMs() >= 0 ? fmtMs(d.endMs()) : "?");
+	}
+
 	@Override
 	public void extractRenderState(GuiGraphicsExtractor graphics, DeltaTracker deltaTracker) {
 		if (!visible || data == null) {
@@ -208,8 +231,10 @@ public final class TimelineGui implements HudElement {
 		String artist = (d.artist() == null || d.artist().isEmpty()) ? "" : d.artist();
 		String left = title + (artist.isEmpty() ? "" : " - " + artist);
 		String mid = String.format("%.1fbpm %d/%d", d.bpm(), d.bpb(), d.tpb());
-		// 状态栏右：播放速度 + 音符流速（note_speed，如 1.00x 16）+ 播放头/结尾
+		// 状态栏右：播放速度 + 音符流速（note_speed，如 1.00x 16）+ 音乐进度 + 播放头/结尾
+		// 音乐进度（分:秒.毫秒 / 分:秒.毫秒）放在「当前刻/总刻」左边（2026-10-01 用户定）
 		String right = String.format("%.2fx %d流速", d.playSpeed(), d.noteSpeed())
+				+ "  " + musicProgress(d)
 				+ "  " + d.playhead() + "/"
 				+ (d.hasEndTime() ? Integer.toString(d.endTime()) : "?");
 		// 状态栏左：曲名-歌手（最左）+ 未保存编辑数（标题右侧）

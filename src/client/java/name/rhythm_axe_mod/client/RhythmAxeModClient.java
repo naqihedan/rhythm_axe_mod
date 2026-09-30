@@ -5,6 +5,7 @@ import name.rhythm_axe_mod.networking.MusicPayloads;
 import name.rhythm_axe_mod.networking.TickratePayloads;
 import name.rhythm_axe_mod.networking.TimelinePayloads;
 import net.fabricmc.api.ClientModInitializer;
+import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientLifecycleEvents;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
 import net.fabricmc.fabric.api.client.rendering.v1.hud.HudElementRegistry;
@@ -22,6 +23,8 @@ public class RhythmAxeModClient implements ClientModInitializer {
 			RhythmAxeMusic.tick();
 			// 每刻一次：资源包重载处理（含后台重新预热曲目）+ 挂起起播 + 「音乐对齐游戏」
 			RhythmAxeMusic.onClientTick();
+			// 音乐续播：跟着音频刷新进度（播放中定期落盘；被停/播完则作废）
+			MusicResume.tick();
 			if (client.player != null && client.level != null && RhythmAxeMusic.isPlaying()
 					&& (clientTickCounter++ % 5 == 0)) {
 				ClientPlayNetworking.send(new MusicPayloads.MusicPosPayload(
@@ -32,6 +35,9 @@ public class RhythmAxeModClient implements ClientModInitializer {
 		// 每渲染帧补充音乐缓冲：慢速播放时数据包会把 tick rate 拉到极低（如 2tps），
 		// 按游戏刻补充会跟不上声卡消耗导致断流；渲染帧率不受 tick rate 影响。
 		LevelRenderEvents.END_MAIN.register(context -> RhythmAxeMusic.tick());
+
+		// 关游戏时兜底再落一次音乐进度（正常「退出到标题」走 setLevel(null)，这条防漏）
+		ClientLifecycleEvents.CLIENT_STOPPING.register(client -> MusicResume.save());
 
 		// 接收服务端音乐控制包（playmusic/pausemusic/resumemusic/stopmusic/preloadmusic）
 		ClientPlayNetworking.registerGlobalReceiver(MusicPayloads.PlayPayload.TYPE, (payload, context) ->

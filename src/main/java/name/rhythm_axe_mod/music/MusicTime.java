@@ -77,13 +77,13 @@ public final class MusicTime {
 	 *   时间点取运行存储 {@code rhythm_axe:runtime.timing_points}（开局从谱面拷贝，与 tick rate 同源）；
 	 * - 都不在 / 对齐开关关闭 / 音乐尚未开始（time&lt;0）/ 读取异常 → 返回 -1（调用方跳过对齐）。
 	 *
-	 * 开关 = options 计分板 {@code editor_audio_align} / {@code play_audio_align}
-	 * （0=关，缺失或其它值=开，见《设置.md》）。
+	 * 开关 = options 计分板 {@code audio_align}（编辑器试听与正式游玩**共用同一个开关**；
+	 * 0=关，缺失或其它值=开，见《设置.md》）。
 	 */
 	public static int gamePlayheadMs(MinecraftServer server) {
 		try {
 			boolean editing = editorActive(server);
-			if (!optionEnabled(server, editing ? "editor_audio_align" : "play_audio_align")) {
+			if (!optionEnabled(server, "audio_align")) {
 				return -1;
 			}
 			int tick = editing ? editorPlayheadTick(server) : playTick(server);
@@ -199,6 +199,20 @@ public final class MusicTime {
 	/** 毫秒钳到 int 安全范围。 */
 	private static int clampMs(double ms) {
 		return (int) Math.min(ms, MAX_MS);
+	}
+
+	/**
+	 * 用调用方**自己缓存**的时间点列表做分段换算（避免每刻重读 storage：{@code getList} 是深拷贝）。
+	 * tps 为空/异常时回退 {@code tick × fallbackMsPerTick}。
+	 */
+	public static double msAtTick(ListTag tps, int tick, double fallbackMsPerTick) {
+		if (tps != null && !tps.isEmpty()) {
+			double ms = piecewise(tps, tick);
+			if (ms >= 0) {
+				return ms;
+			}
+		}
+		return tick * fallbackMsPerTick;
 	}
 
 	/**

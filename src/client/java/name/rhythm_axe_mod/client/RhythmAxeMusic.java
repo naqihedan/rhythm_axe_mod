@@ -147,6 +147,16 @@ public class RhythmAxeMusic {
         return speed;
     }
 
+    /** 当前曲目 id（未播放 / 已停止时为 null）。供音乐续播（{@link MusicResume}）落盘用。 */
+    public static String currentSoundId() {
+        return currentId;
+    }
+
+    /** 当前命令音量（0~1；未播放时为 1）。供音乐续播（{@link MusicResume}）落盘用。 */
+    public static float currentVolume() {
+        return baseVolume;
+    }
+
     /**
      * 收到服务端推送的**游戏播放头**（{@code MusicPayloads.HeadPayload}，每刻一个）——多人对齐用。
      * valid=false 表示当前没有可对齐的目标（不在编辑/游玩中、对齐开关关闭、读取异常）。

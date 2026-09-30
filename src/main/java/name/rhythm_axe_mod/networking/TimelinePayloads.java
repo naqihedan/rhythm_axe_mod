@@ -101,6 +101,7 @@ public final class TimelinePayloads {
 			int unsavedCount, // 未保存编辑数 = |history_cursor - saved_cursor|，状态栏标题左侧
 			boolean unsavedCapped, // 未保存编辑数已达历史上限-1，显示为(上限-2)+
 			boolean hasEndTime, int endTime,
+			int headMs, int endMs, // 编辑器内「刻→毫秒」（按工作副本时间点分段，每刻 = 60000/(bpm×tpb) ms；endMs<0 = 结尾未定义）
 			String title, String artist,
 			List<NoteEntry> notes, List<TimingEntry> timings, List<EventEntry> events
 	) implements CustomPacketPayload {
@@ -123,6 +124,8 @@ public final class TimelinePayloads {
 					buf.writeBoolean(p.unsavedCapped());
 					buf.writeBoolean(p.hasEndTime());
 					buf.writeInt(p.endTime());
+					buf.writeInt(p.headMs());
+					buf.writeInt(p.endMs());
 					ByteBufCodecs.STRING_UTF8.encode(buf, p.title());
 					ByteBufCodecs.STRING_UTF8.encode(buf, p.artist());
 					listOf(NoteEntry.CODEC).encode(buf, p.notes());
@@ -145,6 +148,8 @@ public final class TimelinePayloads {
 						buf.readInt(),
 						buf.readBoolean(),
 						buf.readBoolean(),
+						buf.readInt(),
+						buf.readInt(),
 						buf.readInt(),
 						ByteBufCodecs.STRING_UTF8.decode(buf),
 						ByteBufCodecs.STRING_UTF8.decode(buf),

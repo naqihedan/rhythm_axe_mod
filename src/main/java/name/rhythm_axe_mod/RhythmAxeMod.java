@@ -299,14 +299,16 @@ public class RhythmAxeMod implements ModInitializer {
 				source.sendSuccess(() -> Component.literal("  §7目标位置 = 刻内相位补偿 + 居中半刻 + §faudio_sync_offset§7（只动音频，不动播放头）"), false);
 				source.sendSuccess(() -> Component.literal("  §7容差 = max(20 音乐ms, 每刻音乐ms/2+10)；单次最多挪 400ms×速度；对齐后冷却 20 刻"), false);
 				source.sendSuccess(() -> Component.literal("  §7seek 落点残差自动学习（否则落点偏差会被当成新偏差 → “音乐一直在自动调整”）"), false);
-				source.sendSuccess(() -> Component.literal("  §7开关 = options 计分板 §feditor_audio_align§7 / §fplay_audio_align§7（1=开，0=关）"), false);
+				source.sendSuccess(() -> Component.literal("  §7开关 = options 计分板 §faudio_align§7（1=开，0=关；编辑器试听与游玩共用）"), false);
 				source.sendSuccess(() -> Component.literal("  §7标定 = options 计分板 §faudio_sync_offset§7（默认 §f-50§7 = 0.25x 下所需补偿；按 (1−速度)/0.75 缩放，1x 自动归零）"), false);
 				source.sendSuccess(() -> Component.literal("  §7起播/快进快退/暂停→播放 都走同一条锚点路径，偏移同样生效"), false);
 				source.sendSuccess(() -> Component.literal("  §7单人直接读服务端；多人由服务端每刻推送播放头（music_head 包）"), false);
 				source.sendSuccess(() -> Component.literal(""), false);
 				source.sendSuccess(() -> Component.literal("§e权限等级：§f/tick 已降为 2 级，音乐指令为 2 级"), false);
 				source.sendSuccess(() -> Component.literal("§e客户端同步：§f速率 > 20 tps 时自动加速渲染（多人会下发给所有客户端，后进的也会补发）"), false);
-				source.sendSuccess(() -> Component.literal("§e切换世界：§f自动重置为 20 tps"), false);
+				source.sendSuccess(() -> Component.literal("§e切换世界：§f客户端自动重置为 20 tps"), false);
+				source.sendSuccess(() -> Component.literal("§e速率持久化：§f退出存档记录当前速率，重进自动恢复（无记录则 20 tps 兜底）"), false);
+				source.sendSuccess(() -> Component.literal("§e音乐续播：§f退出存档时记住在播曲目与进度，重进同一存档从该进度接着播（客户端 config 里存）"), false);
 				source.sendSuccess(() -> Component.literal("§e命令确认弹窗：§f由 gamerule rhythm_axe_mod:confirm_command 控制（默认true=原版确认，false=跳过）"), false);
 				source.sendSuccess(() -> Component.literal("§6========================================"), false);
 				return 1;

@@ -8,6 +8,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 
+import name.rhythm_axe_mod.music.MusicTime;
 import name.rhythm_axe_mod.networking.TimelinePayloads;
 import name.rhythm_axe_mod.networking.TimelinePayloads.EventEntry;
 import name.rhythm_axe_mod.networking.TimelinePayloads.NoteEntry;
@@ -40,6 +41,20 @@ import net.minecraft.world.scores.ScoreHolder;
  */
 public final class TimelineSync {
 	private static final Identifier EDITOR_STORAGE = Identifier.parse("rhythm_axe:maps.editor");
+
+	/**
+	 * 「刻→毫秒」结果写给数据包（数据包侧主菜单要显示同一口径的音乐进度）：
+	 * {@code rhythm_axe:editor_time.head_ms / end_ms}（毫秒；end_ms < 0 = 结尾未定义）。
+	 * 用独立 storage：不与数据包自己的 {@code rhythm_axe:editor.runtime} 混用，也就不必读-改-写。
+	 */
+	private static final Identifier TIME_STORAGE = Identifier.parse("rhythm_axe:editor_time");
+
+	/** 工作副本时间点缓存（{@code getList} 是深拷贝，不能每刻重读）与它对应的游标/内容版本。 */
+	private static ListTag cachedTimingPoints;
+	private static boolean cachedHasEndTime;
+	private static int cachedEndTime;
+	private static int cachedTpsCursor = Integer.MIN_VALUE;
+	private static int cachedTpsContentVer = Integer.MIN_VALUE;
 
 	/** 编辑者 tag：数据包侧 editor/coop/join 打上、leave/exit 摘掉；时间轴 HUD 的推送目标 = 所有带它的人。 */
 	private static final String EDITOR_TAG = "editor_active";
@@ -111,6 +126,29 @@ public final class TimelineSync {
 				boolean unsavedCapped = unsaved >= historyLimit - 1;
 				int unsavedDisplay = unsavedCapped ? Math.max(0, historyLimit - 2) : unsaved;
 				int contentVer = editor.getIntOr("content_ver", 0);
+				// —— 编辑器内「刻 → 毫秒」（音乐进度 / 时间轴信息行用）——
+				// 口径：按工作副本时间点分段换算（每刻 = 60000/(bpm×tpb) ms）。⚠️ 编辑器内 tick rate 随时间点变，
+				// 所以**1 刻 ≠ 50ms**；大厅预览（无 tick rate 调整、20tps）才按固定 50ms/刻，两个口径千万别混用。
+				// 时间点列表只在游标/内容版本变化时重读（getList 是深拷贝，每刻读会拖慢），毫秒则每刻现算。
+				int headMs = -1;
+				int endMs = -1;
+				try {
+					if (cursor != cachedTpsCursor || contentVer != cachedTpsContentVer) {
+						cachedTpsCursor = cursor;
+						cachedTpsContentVer = contentVer;
+						CompoundTag tpsSnap = currentSnapshot(editor);
+						cachedTimingPoints = tpsSnap.getList("timing_points").orElse(null);
+						cachedEndTime = tpsSnap.getIntOr("end_time", 0);
+						cachedHasEndTime = tpsSnap.contains("end_time");
+					}
+					double msPerTickNow = server.tickRateManager().millisecondsPerTick();
+					headMs = msToInt(MusicTime.msAtTick(cachedTimingPoints, playhead, msPerTickNow));
+					endMs = cachedHasEndTime
+							? msToInt(MusicTime.msAtTick(cachedTimingPoints, cachedEndTime, msPerTickNow)) : -1;
+					writeRuntime(storage, headMs, endMs);
+				} catch (Exception ignored) {
+					// 读取异常 → headMs/endMs 保持 -1，客户端退化为不显示具体位置
+				}
 				// content_ver：编辑器数据保存/修改时自增（数据包在确认保存处 bump），
 				// 用于在 cursor/playhead/playing/speed 都不变时也强制刷新（如音符属性面板保存）。
 				// selection_fp：选中音符集合变化（选中/取消/清空）→ 刷新让客户端画黄色选中描边。
@@ -122,7 +160,7 @@ public final class TimelineSync {
 						|| contentVer != lastContentVer || !selFp.equals(lastSelectionFp)
 						|| !rangeFp.equals(lastRangeFp);
 				if (changed) {
-					ShowPayload payload = buildPayload(editor, noteSpeed, unsavedDisplay, unsavedCapped);
+					ShowPayload payload = buildPayload(editor, noteSpeed, unsavedDisplay, unsavedCapped, headMs, endMs);
 					sendShow(server, payload);
 				}
 				initialized = true;
@@ -329,8 +367,25 @@ public final class TimelineSync {
 		return sb.toString();
 	}
 
+	/** 毫秒 → int（负数/超范围钳制）。 */
+	private static int msToInt(double ms) {
+		return (int) Math.min(Math.max(ms, 0), Integer.MAX_VALUE);
+	}
+
+	/** 把「刻→毫秒」结果写进 {@link #TIME_STORAGE}，供数据包侧主菜单显示音乐进度。 */
+	private static void writeRuntime(CommandStorage storage, int headMs, int endMs) {
+		try {
+			CompoundTag tag = new CompoundTag();
+			tag.putInt("head_ms", headMs);
+			tag.putInt("end_ms", endMs);
+			storage.set(TIME_STORAGE, tag);
+		} catch (Exception ignored) {
+		}
+	}
+
 	/** 从 maps.editor 构造窗口 ShowPayload。异常一律返回最小空数据，保证不崩。 */
-	private static ShowPayload buildPayload(CompoundTag editor, int noteSpeed, int unsavedDisplay, boolean unsavedCapped) {
+	private static ShowPayload buildPayload(CompoundTag editor, int noteSpeed, int unsavedDisplay, boolean unsavedCapped,
+			int headMs, int endMs) {
 		try {
 			CompoundTag snapshot = currentSnapshot(editor);
 			int playhead = editor.getIntOr("playhead", 0);
@@ -356,6 +411,7 @@ public final class TimelineSync {
 					timing.bpm, timing.bpb, timing.tpb,
 					playSpeed, noteSpeed, unsavedDisplay, unsavedCapped,
 					snapshot.contains("end_time"), snapshot.getIntOr("end_time", 0),
+					headMs, endMs,
 					resolveTitle(snapshot), snapshot.getStringOr("artist", ""),
 					notes, timing.list, events);
 		} catch (Exception e) {
@@ -365,7 +421,7 @@ public final class TimelineSync {
 					false, NO_TIME, false, NO_TIME,
 					windowLen,
 					150.0f, 4, 8, 1.0f, noteSpeed, unsavedDisplay, unsavedCapped,
-					false, 0, "", "",
+					false, 0, headMs, endMs, "", "",
 					List.of(), List.of(), List.of());
 		}
 	}
