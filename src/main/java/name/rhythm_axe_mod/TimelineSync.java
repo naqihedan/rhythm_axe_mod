@@ -1,5 +1,8 @@
 package name.rhythm_axe_mod;
 
+import com.google.gson.JsonElement;
+import com.google.gson.JsonParser;
+import com.mojang.serialization.JsonOps;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
@@ -19,6 +22,9 @@ import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.ListTag;
+import net.minecraft.nbt.NbtOps;
+import net.minecraft.network.chat.Component;
+import net.minecraft.network.chat.ComponentSerialization;
 import net.minecraft.resources.Identifier;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
@@ -239,107 +245,79 @@ public final class TimelineSync {
 		return tag.getFloat(key).orElse(def);
 	}
 
-	/** 把谱面 title 解析成纯文本，支持 JSON 文本组件（对象/列表/带引号字符串）与复合/列表 NBT。 */
+	/**
+	 * 把谱面 title 解析成纯文本，支持三种存储形态（与数据包 utilization/title_comp 一致）：
+	 *  - JSON 文本组件字符串：{"text":"A"} / [{"text":"A"},{"text":"B"}] / "新手教程"
+	 *  - 裸纯文本：如 测试谱面
+	 *  - 复合/列表 NBT：如逐字渐变标题 {text:"G",extra:[{text:"O"},...]}
+	 * 复合/列表一律交给原版组件解析器，能完整拼出 extra；旧实现只取 text，渐变标题只会显示第一个字。
+	 */
 	private static String resolveTitle(CompoundTag snapshot) {
 		if (!snapshot.contains("title")) {
 			return "";
 		}
-		net.minecraft.nbt.Tag tag = snapshot.get("title");
-		// 字符串：JSON 文本组件字符串，如 {"text":"A"} / [{"text":"A"},{"text":"B"}] / "新手教程"
+		// 1) 字符串：JSON 组件串走 JSON 解析；裸纯文本原样返回
 		String raw = snapshot.getStringOr("title", "");
 		if (!raw.isEmpty()) {
-			String t = raw.trim();
-			if (t.startsWith("[")) {
-				return extractComponentList(t);
+			return resolveTextString(raw);
+		}
+		// 2) 复合/列表 NBT → 原版组件解析（失败退回手工拼接）
+		net.minecraft.nbt.Tag tag = snapshot.get("title");
+		if (tag == null) {
+			return "";
+		}
+		try {
+			Component comp = ComponentSerialization.CODEC.parse(NbtOps.INSTANCE, tag).result().orElse(null);
+			if (comp != null) {
+				return comp.getString();
 			}
-			if (t.startsWith("{")) {
-				return extractComponentText(t);
+		} catch (Exception ignored) {
+		}
+		return plainText(tag);
+	}
+
+	/** JSON 文本组件字符串 → 纯文本；解析不出来或本来就是裸纯文本则原样返回。 */
+	private static String resolveTextString(String raw) {
+		String t = raw.trim();
+		if (t.isEmpty()) {
+			return "";
+		}
+		char c0 = t.charAt(0);
+		if (c0 == '{' || c0 == '[' || c0 == '"') {
+			try {
+				JsonElement json = JsonParser.parseString(t);
+				Component comp = ComponentSerialization.CODEC.parse(JsonOps.INSTANCE, json).result().orElse(null);
+				if (comp != null) {
+					return comp.getString();
+				}
+			} catch (Exception ignored) {
+				// 非法 JSON → 按纯文本处理
 			}
-			if (t.startsWith("\"")) {
+			if (c0 == '"') {
 				return unquote(t);
 			}
-			return t;
 		}
-		// 复合 {text:...}：取 text 子串（同数据包显示清洗）
-		if (tag instanceof CompoundTag ct && ct.contains("text")) {
-			return ct.getStringOr("text", "");
+		return t;
+	}
+
+	/** 兜底：手工从复合/列表 NBT 拼纯文本（text + extra），仅在原版组件解析不可用时使用。 */
+	private static String plainText(net.minecraft.nbt.Tag tag) {
+		if (tag instanceof CompoundTag ct) {
+			StringBuilder sb = new StringBuilder(ct.getStringOr("text", ""));
+			net.minecraft.nbt.Tag extra = ct.get("extra");
+			if (extra != null) {
+				sb.append(plainText(extra));
+			}
+			return sb.toString();
 		}
-		// 列表 [{...},{...}]：直接作为 NBT 列表存，拼接各元素 text
 		if (tag instanceof ListTag lt) {
 			StringBuilder sb = new StringBuilder();
 			for (net.minecraft.nbt.Tag el : lt) {
-				if (el instanceof CompoundTag et && et.contains("text")) {
-					sb.append(et.getStringOr("text", ""));
-				}
+				sb.append(plainText(el));
 			}
 			return sb.toString();
 		}
 		return "";
-	}
-
-	/** 从单个 JSON 组件对象 {...,"text":"...",...} 提取 text 文本（简单解析，含转义）。 */
-	private static String extractComponentText(String obj) {
-		int i = obj.indexOf("\"text\"");
-		if (i < 0) {
-			return "";
-		}
-		int colon = obj.indexOf(':', i);
-		if (colon < 0) {
-			return "";
-		}
-		int p = colon + 1;
-		while (p < obj.length() && Character.isWhitespace(obj.charAt(p))) {
-			p++;
-		}
-		if (p < obj.length() && obj.charAt(p) == '"') {
-			StringBuilder sb = new StringBuilder();
-			int j = p + 1;
-			while (j < obj.length() && obj.charAt(j) != '"') {
-				if (obj.charAt(j) == '\\' && j + 1 < obj.length()) {
-					j++;
-				}
-				sb.append(obj.charAt(j));
-				j++;
-			}
-			return sb.toString();
-		}
-		return "";
-	}
-
-	/** 从列表组件 [{...},{...}] 拼接各元素 text。 */
-	private static String extractComponentList(String list) {
-		StringBuilder sb = new StringBuilder();
-		int from = 0;
-		while (true) {
-			int i = list.indexOf("\"text\"", from);
-			if (i < 0) {
-				break;
-			}
-			int colon = list.indexOf(':', i);
-			if (colon < 0) {
-				break;
-			}
-			int p = colon + 1;
-			while (p < list.length() && Character.isWhitespace(list.charAt(p))) {
-				p++;
-			}
-			if (p < list.length() && list.charAt(p) == '"') {
-				int j = p + 1;
-				StringBuilder seg = new StringBuilder();
-				while (j < list.length() && list.charAt(j) != '"') {
-					if (list.charAt(j) == '\\' && j + 1 < list.length()) {
-						j++;
-					}
-					seg.append(list.charAt(j));
-					j++;
-				}
-				sb.append(seg);
-				from = j + 1;
-			} else {
-				from = colon + 1;
-			}
-		}
-		return sb.toString();
 	}
 
 	/** 去除 JSON 字符串两端引号并反转义（\n \t \" \\ 等）。 */
