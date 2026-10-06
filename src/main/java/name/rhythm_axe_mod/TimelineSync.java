@@ -75,6 +75,8 @@ public final class TimelineSync {
 	private static int lastContentVer;
 	private static String lastSelectionFp = "";
 	private static String lastRangeFp = "";
+	/** 记录点指纹（"-" = 未设；"r<刻>" = 已设在该刻）—— 设点/清除时立即推一次。 */
+	private static String lastRecordFp = "";
 	private static boolean wasOn;
 	private static int windowLen = 64;
 	private static int lastLoggedGui = -1;
@@ -101,6 +103,7 @@ public final class TimelineSync {
 		lastContentVer = 0;
 		lastSelectionFp = "";
 		lastRangeFp = "";
+		lastRecordFp = "";
 		lastLoggedGui = -1;
 	}
 
@@ -160,11 +163,13 @@ public final class TimelineSync {
 				// selection_fp：选中音符集合变化（选中/取消/清空）→ 刷新让客户端画黄色选中描边。
 				String selFp = selectionFingerprint(collectSelectedIds(editor));
 				String rangeFp = rangeFingerprint(editor);
+				// 记录点（蹲下点击播放/暂停工具设的播放头刻数，数据包写在 maps.editor.record_head）
+				String recordFp = editor.contains("record_head") ? ("r" + editor.getIntOr("record_head", 0)) : "-";
 				boolean changed = !initialized || playing || playhead != lastPlayhead
 						|| cursor != lastCursor || playSpeed != lastPlaySpeed
 						|| noteSpeed != lastNoteSpeed || unsaved != lastUnsaved
 						|| contentVer != lastContentVer || !selFp.equals(lastSelectionFp)
-						|| !rangeFp.equals(lastRangeFp);
+						|| !rangeFp.equals(lastRangeFp) || !recordFp.equals(lastRecordFp);
 				if (changed) {
 					ShowPayload payload = buildPayload(editor, noteSpeed, unsavedDisplay, unsavedCapped, headMs, endMs);
 					sendShow(server, payload);
@@ -178,6 +183,7 @@ public final class TimelineSync {
 				lastContentVer = contentVer;
 				lastSelectionFp = selFp;
 				lastRangeFp = rangeFp;
+				lastRecordFp = recordFp;
 			}
 		} else if (wasOn) {
 			// 开关关闭/编辑器退出 → 清理所有客户端
@@ -381,10 +387,14 @@ public final class TimelineSync {
 			// 时间范围选择（选择工具 + 蹲下右键设的入点/出点，`NO_TIME` = 未设）
 			int rangeIn = timeRangeValue(editor, "in");
 			int rangeOut = timeRangeValue(editor, "out");
+			// 记录点（蹲下点击播放/暂停工具设置；暂停会跳回这里）——键存在即“已设”
+			boolean recordSet = editor.contains("record_head");
+			int recordHead = editor.getIntOr("record_head", 0);
 
 			return new ShowPayload(
 					playhead, playing,
 					rangeIn != NO_TIME, rangeIn, rangeOut != NO_TIME, rangeOut,
+					recordSet, recordHead,
 					windowLen,
 					timing.bpm, timing.bpb, timing.tpb,
 					playSpeed, noteSpeed, unsavedDisplay, unsavedCapped,
@@ -397,6 +407,7 @@ public final class TimelineSync {
 			return new ShowPayload(
 					editor.getIntOr("playhead", 0), editor.getBooleanOr("playing", false),
 					false, NO_TIME, false, NO_TIME,
+					false, 0,
 					windowLen,
 					150.0f, 4, 8, 1.0f, noteSpeed, unsavedDisplay, unsavedCapped,
 					false, 0, headMs, endMs, "", "",

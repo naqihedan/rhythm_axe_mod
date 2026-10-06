@@ -409,6 +409,17 @@ public final class TimelineGui implements HudElement {
 		// ── 播放头（粗黄绿，贯穿所有行，固定）──
 		graphics.fill(playheadX - 1, timelineTop - 1, playheadX + 2, y2 - 1, withAlpha(0xFFCCFF33, alpha));
 		graphics.fill(playheadX - 3, timelineTop - 3, playheadX + 4, timelineTop + 1, withAlpha(0xFFCCFF33, alpha));
+
+		// ── 记录点（半透明播放头）：蹲下点击播放/暂停工具设的播放头位置，暂停会自动跳回这里 ──
+		//  与真播放头同形状但半透明（约 40% 不透明度），一眼区分“会跳回去的位置”。
+		if (d.recordSet()) {
+			int recordX = xRaw(start, pxPerTick, x1, d.recordHead());
+			if (recordX >= x1 && recordX <= x2) {
+				int color = withAlpha(0xFF8CFFB0, alpha * 0.40f);
+				graphics.fill(recordX - 1, timelineTop - 1, recordX + 2, y2 - 1, color);
+				graphics.fill(recordX - 3, timelineTop - 3, recordX + 4, timelineTop + 1, color);
+			}
+		}
 	}
 
 	/** 音符 time 换算到 x；在窗口外返回 -1。 */
