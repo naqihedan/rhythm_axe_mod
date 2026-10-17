@@ -109,6 +109,14 @@ public class RhythmAxeMusic {
     private static boolean finished;   // PCM 已全部排入（等待声卡播完）
     private static boolean playing;    // 用户意图：正在播放
     private static float baseVolume = 1f;   // 命令音量（/playmusic 的 volume 参数），实际增益还要乘游戏内音量
+    /**
+     * 「全局音乐偏移」（毫秒，★ 2026-10-17 改语义：**正 = 音乐延后 / 负 = 音乐提前**）：音游标配的设备延迟补偿。
+     * 来源 = 服务端 options 计分板 music_offset，随 PlayPayload 下发（{@link #setGlobalOffsetMs}）。
+     * 与 {@link #syncOffsetApplied()}（变速固有相位补偿，随速度缩放、1x 归零）**叠加**生效，
+     * 但本值是**常数**：任何速度下都原样加进「起播锚点」与「自动对齐目标 center」两处。
+     * 退出续播（MusicResume → play()）沿用上次记下的值，无需单独持久化。
+     */
+    private static int globalOffsetMs = 0;
     private static float appliedGain = -1f; // 上次写入 AL_GAIN 的值（-1 = 无效值，强制重写）
     private static String currentId;   // 当前曲目（用于反馈）
 	private static long lastPosLogMs;  // 上次位置日志时间戳（诊断）
@@ -120,6 +128,9 @@ public class RhythmAxeMusic {
 	// 多人用：服务端每刻推送的游戏播放头（单人不用 —— 客户端直接读集成服务端，零延迟）
 	private static int pushedHeadMs = -1;
 	private static long pushedHeadAt;   // 收到时刻（System.currentTimeMillis）
+	// 多人用：服务端每刻随播放头推来的「全局音乐偏移」（单机直读计分板，不靠它）
+	private static int pushedOffsetMs = 0;
+	private static long pushedOffsetAt;
 	// 挂起起播（曲目尚未解码完）：绝不阻塞渲染线程，解完再用「当前播放头」起播
 	private static String pendingId;
 	private static int pendingStartMs;
@@ -160,10 +171,13 @@ public class RhythmAxeMusic {
     /**
      * 收到服务端推送的**游戏播放头**（{@code MusicPayloads.HeadPayload}，每刻一个）——多人对齐用。
      * valid=false 表示当前没有可对齐的目标（不在编辑/游玩中、对齐开关关闭、读取异常）。
+     * offsetMs = 服务端当前的全局音乐偏移（★ 2026-10-17：随包每刻推送 ⇒ 播放中改设置也能实时生效）。
      */
-    public static void setPushedPlayhead(int playheadMs, boolean valid) {
+    public static void setPushedPlayhead(int playheadMs, boolean valid, int offsetMs) {
         pushedHeadMs = valid ? Math.max(playheadMs, 0) : -1;
         pushedHeadAt = System.currentTimeMillis();
+        pushedOffsetMs = offsetMs;
+        pushedOffsetAt = pushedHeadAt;
     }
 
     /**
@@ -251,7 +265,9 @@ public class RhythmAxeMusic {
         // ★ 相位补偿 + **居中**：理想对齐是「刻边界处偏差 0」，但那样在刻内音频会一路领先到整刻
         //   （慢放时每刻的真实时间被拉长 ⇒ 听感就是“音乐抢拍”，最大可达一个 mspt）。
         //   把目标整体下移半刻 ⇒ 音频相位误差在 [−Δ/2, +Δ/2] 摆动，最大提前量减半、听感居中。
-        int center = Math.round((effPhase - 0.5f) * tickSrcMs) + syncOffsetApplied();
+        // ★ globalOffsetMs（全局音乐偏移，常数；正 = 音乐延后）也必须加进 center（符号同起播锚点，取负号）：
+        //   不加的话自动对齐会在 1 秒内把起播锚点里加的偏移抹掉（对齐目标 = 音频该在的位置，两处必须同一套约定）。
+        int center = Math.round((effPhase - 0.5f) * tickSrcMs) + syncOffsetApplied() - globalOffsetMs;
         // ★ 容差必须 ≥ 半个刻：先前的 20ms 比「期望领先」还小 ⇒ 连 3ms 的正常摆动都被判成偏差，
         //   每一次修正都把音频往前推一次，越修越提前（日志里 [MusicAlign] 偏差 -3ms 就是它）。
         int tol = Math.max(ALIGN_TOLERANCE_MS, Math.round(tickSrcMs / 2f) + 10);
@@ -275,8 +291,8 @@ public class RhythmAxeMusic {
         long now = System.currentTimeMillis();
         if (now - lastPosLogMs >= 1000) {
             lastPosLogMs = now;
-            LOGGER.info("[MusicPos] 出声={}ms 播放头={}ms delta={}ms 期望={}ms 残差={}ms 有效={}ms 相位={} 每刻音乐={}ms 偏移={}ms speed={}",
-                    audible, playheadMs, delta, center, seekResidual, eff, String.format("%.2f", phase), tickSrcMs, syncOffsetApplied(), speed);
+            LOGGER.info("[MusicPos] 出声={}ms 播放头={}ms delta={}ms 期望={}ms 残差={}ms 有效={}ms 相位={} 每刻音乐={}ms 变速偏移={}ms 全局偏移={}ms speed={}",
+                    audible, playheadMs, delta, center, seekResidual, eff, String.format("%.2f", phase), tickSrcMs, syncOffsetApplied(), globalOffsetMs, speed);
         }
         if (alignStreak == 0) {
             alignStreak = 1;
@@ -428,8 +444,8 @@ public class RhythmAxeMusic {
         }
         lastPosLogMs = now;
         int phMs = (int) MusicTime.headMs(server, tick);
-        LOGGER.info("[MusicPos] (对齐关) 出声={}ms 播放头={}ms delta={}ms speed={} 偏移={}ms",
-                audible, phMs, audible - phMs, speed, syncOffsetApplied());
+        LOGGER.info("[MusicPos] (对齐关) 出声={}ms 播放头={}ms delta={}ms speed={} 变速偏移={}ms 全局偏移={}ms",
+                audible, phMs, audible - phMs, speed, syncOffsetApplied(), globalOffsetMs);
     }
 
     /**
@@ -503,6 +519,14 @@ public class RhythmAxeMusic {
             AL10.alSourcePlay(source);
         }
         return true;
+    }
+
+    /**
+     * 记下服务端下发的「全局音乐偏移」（毫秒，正 = 音乐延后 / 负 = 音乐提前）。收 PlayPayload 时先调本方法再调
+     * {@link #play}；退出续播（MusicResume → play）沿用上次记下的值。作用于起播锚点与自动对齐目标。
+     */
+    public static void setGlobalOffsetMs(int ms) {
+        globalOffsetMs = ms;
     }
 
     /** 播放音效事件。startMs=起始毫秒，speed=播放速率（保调），volume=音量0~1。 */
@@ -580,7 +604,9 @@ public class RhythmAxeMusic {
         //    报告位置落在播放头**之后** 50ms，配上 OLA 固有提前量 β≈+50 就变成“听到的比播放头早 100ms”，
         //    于是每次起播/快进快退都要等自动对齐慢慢拽回来，听感正是“音乐一直在自动调整”。）
         //   这样「播放 / 快进快退（resync 重下 playmusic）/ 暂停→播放」都走同一条对齐好的路径。
-        int offsetMs = syncOffsetApplied();
+        // ★ globalOffsetMs（全局音乐偏移）与 syncOffsetApplied() 叠加，但符号相反：
+        //   本值语义 = 正「音乐延后」/ 负「音乐提前」（2026-10-17 与最初的「正=提前」交换）⇒ 这里要**减**。
+        int offsetMs = syncOffsetApplied() - globalOffsetMs;
         if (offsetMs != 0) {
             startMs = Math.max(0, startMs + offsetMs);
         }
@@ -653,13 +679,71 @@ public class RhythmAxeMusic {
 
     /**
      * 每客户端刻调用一次（渲染线程）：资源包重载处理（含重载后自动重新预热曲目）
-     * + 挂起起播 + 自动对齐。**只许挂在 ClientTickEvents**——tick() 还会被渲染帧回调调用。
+     * + 挂起起播 + 全局偏移实时同步 + 自动对齐。**只许挂在 ClientTickEvents**——tick() 还会被渲染帧回调调用。
      */
     public static void onClientTick() {
         Minecraft mc = Minecraft.getInstance();
         maybeClearCacheOnReload(mc);
         pendingTick();
+        refreshGlobalOffset(mc);   // ★ 2026-10-17：全局偏移每刻同步（播放中改值立即生效）
         alignTick();
+    }
+
+    /**
+     * 每刻同步「全局音乐偏移」（2026-10-17）：让它在**播放中**改值也立刻生效，不必等下一次 `/playmusic`。
+     *
+     * <p>读取优先级：<b>单机</b> → 直接读集成服务端 `options.music_offset`（零延迟）；
+     * <b>多人</b> → 用服务端每刻随播放头推来的值（{@link #setPushedPlayhead}，{@link #PUSHED_HEAD_TTL_MS} 内视为有效）。
+     *
+     * <p>值一变且正在播放 ⇒ 立刻把音频整体平移 `(旧 − 新)` 毫秒：因为对齐目标 `center = … − offset`，
+     * offset 变大 d 意味着目标 delta 变小 d ⇒ 音频内容要后退 d（听感延后）。
+     * 平移后置 `seekPending` 让对齐重新学习落点残差（否则几十毫秒的落点差会被当成新偏差）。
+     */
+    private static void refreshGlobalOffset(Minecraft mc) {
+        int latest = readLiveGlobalOffset(mc);
+        if (latest == Integer.MIN_VALUE || latest == globalOffsetMs) {
+            return;
+        }
+        int old = globalOffsetMs;
+        globalOffsetMs = latest;
+        if (!playing || pcm == null) {
+            return;   // 没在播：只更新目标值，下次起播会用新值
+        }
+        int audible = audibleMs();
+        if (audible < 0) {
+            return;
+        }
+        int target = Math.max(0, audible + (old - latest));
+        if (seekAudioTo(target)) {
+            seekPending = true;   // 落点残差重新学
+            alignStreak = 0;
+            LOGGER.info("[MusicOffset] 全局偏移 {} → {}ms（实时生效），音频已挪到 {}ms", old, latest, target);
+        }
+    }
+
+    /**
+     * 当前**实时**全局偏移（毫秒）：单机直读计分板优先，其次用服务端每刻推送值；都拿不到返回
+     * {@link Integer#MIN_VALUE}（哨兵，调用方保持原值）。
+     */
+    private static int readLiveGlobalOffset(Minecraft mc) {
+        try {
+            MinecraftServer server = mc == null ? null : mc.getSingleplayerServer();
+            if (server != null) {
+                Objective obj = server.getScoreboard().getObjective("options");
+                if (obj == null) {
+                    return 0;
+                }
+                ReadOnlyScoreInfo info = server.getScoreboard()
+                        .getPlayerScoreInfo(ScoreHolder.forNameOnly("music_offset"), obj);
+                return info == null ? 0 : (int) info.value();
+            }
+        } catch (Throwable ignored) {
+            // 落到推送值
+        }
+        if (System.currentTimeMillis() - pushedOffsetAt <= PUSHED_HEAD_TTL_MS) {
+            return pushedOffsetMs;
+        }
+        return Integer.MIN_VALUE;
     }
 
     /** 暂停。未播放时无事发生（符合文档）。 */

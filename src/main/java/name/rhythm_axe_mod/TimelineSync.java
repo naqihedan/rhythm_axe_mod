@@ -210,7 +210,11 @@ public final class TimelineSync {
 		}
 	}
 
-	/** 读取 options 计分板 note_speed（音符流速，状态栏显示；无分返回 16 默认）。 */
+	/**
+	 * 读取 options 计分板 editor_note_speed（**编辑器**音符流速，时间轴状态栏显示 "1.0x 16" 里的 16；
+	 * 无分返回 16 默认）。
+	 * ★ 2026-10-17：编辑器流速已与游玩流速（options.note_speed）分开，这里必须读编辑器那份。
+	 */
 	private static int readNoteSpeed(MinecraftServer server) {
 		try {
 			Objective obj = server.getScoreboard().getObjective("options");
@@ -218,7 +222,7 @@ public final class TimelineSync {
 				return 16;
 			}
 			ReadOnlyScoreInfo info = server.getScoreboard()
-					.getPlayerScoreInfo(ScoreHolder.forNameOnly("note_speed"), obj);
+					.getPlayerScoreInfo(ScoreHolder.forNameOnly("editor_note_speed"), obj);
 			if (info == null || info.value() <= 0) {
 				return 16;
 			}

@@ -14,14 +14,19 @@ public final class MusicPayloads {
 	private MusicPayloads() {
 	}
 
-	/** 播放：soundId=音效事件id，startMs=起始毫秒，speed=播放速率（保调），volume=音量0~1 */
-	public record PlayPayload(String soundId, int startMs, float speed, float volume) implements CustomPacketPayload {
+	/**
+	 * 播放：soundId=音效事件id，startMs=起始毫秒，speed=播放速率（保调），volume=音量0~1，
+	 * offsetMs=「全局音乐偏移」（options 计分板 music_offset，服务端执行命令时读取后随包下发；
+	 * 正=音乐延后、负=音乐提前，用于补偿设备输出延迟；多人下每个客户端都拿到同一个值）。
+	 */
+	public record PlayPayload(String soundId, int startMs, float speed, float volume, int offsetMs) implements CustomPacketPayload {
 		public static final Type<PlayPayload> TYPE = new Type<>(Identifier.parse("rhythm_axe_mod:music_play"));
 		public static final StreamCodec<ByteBuf, PlayPayload> STREAM_CODEC = StreamCodec.composite(
 				ByteBufCodecs.STRING_UTF8, PlayPayload::soundId,
 				ByteBufCodecs.VAR_INT, PlayPayload::startMs,
 				ByteBufCodecs.FLOAT, PlayPayload::speed,
 				ByteBufCodecs.FLOAT, PlayPayload::volume,
+				ByteBufCodecs.VAR_INT, PlayPayload::offsetMs,
 				PlayPayload::new);
 
 		@Override
@@ -80,11 +85,12 @@ public final class MusicPayloads {
 	 * 就靠服务端每刻推送这个包（只发给收过 /playmusic 的玩家）。
 	 * valid=false 表示当前没有可对齐的播放头（不在编辑/游玩中、对齐开关关闭、读取异常）→ 客户端跳过对齐。
 	 */
-	public record HeadPayload(int playheadMs, boolean valid) implements CustomPacketPayload {
+	public record HeadPayload(int playheadMs, boolean valid, int offsetMs) implements CustomPacketPayload {
 		public static final Type<HeadPayload> TYPE = new Type<>(Identifier.parse("rhythm_axe_mod:music_head"));
 		public static final StreamCodec<ByteBuf, HeadPayload> STREAM_CODEC = StreamCodec.composite(
 				ByteBufCodecs.VAR_INT, HeadPayload::playheadMs,
 				ByteBufCodecs.BOOL, HeadPayload::valid,
+				ByteBufCodecs.VAR_INT, HeadPayload::offsetMs,
 				HeadPayload::new);
 
 		@Override
