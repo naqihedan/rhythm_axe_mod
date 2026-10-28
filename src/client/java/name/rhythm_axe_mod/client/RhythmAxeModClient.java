@@ -42,9 +42,10 @@ public class RhythmAxeModClient implements ClientModInitializer {
 		// 接收服务端音乐控制包（playmusic/pausemusic/resumemusic/stopmusic/preloadmusic）
 		ClientPlayNetworking.registerGlobalReceiver(MusicPayloads.PlayPayload.TYPE, (payload, context) ->
 				context.client().execute(() -> {
-					// ★ 先记下「全局音乐偏移」（服务端随包下发）再起播：play() 内部会用它做起播锚点，
-					//   alignTick() 也用它做对齐目标。退出续播（MusicResume）走 play() 时沿用上次记下的值。
+					// ★ 先记下「全局音乐偏移」与「谱面音乐偏移」（服务端随包下发）再起播：play() 内部会用它们做起播锚点，
+					//   alignTick() 也用来做对齐目标。退出续播（MusicResume）走 play() 时沿用上次记下的值。
 					RhythmAxeMusic.setGlobalOffsetMs(payload.offsetMs());
+					RhythmAxeMusic.setMapOffsetMs(payload.mapOffsetMs());
 					RhythmAxeMusic.play(payload.soundId(), payload.startMs(), payload.speed(), payload.volume());
 				}));
 		// 预加载：解析路径+读字节在渲染线程（毫秒级），解码在后台线程（preload 内部去重）
@@ -59,7 +60,7 @@ public class RhythmAxeModClient implements ClientModInitializer {
 		// 服务端推送的游戏播放头（每刻一个）：多人下「音乐对齐游戏」的目标位置
 		ClientPlayNetworking.registerGlobalReceiver(MusicPayloads.HeadPayload.TYPE, (payload, context) ->
 				context.client().execute(() ->
-						RhythmAxeMusic.setPushedPlayhead(payload.playheadMs(), payload.valid(), payload.offsetMs())));
+						RhythmAxeMusic.setPushedPlayhead(payload.playheadMs(), payload.valid(), payload.offsetMs(), payload.mapOffsetMs())));
 
 		// 编辑器可视化时间轴：接收窗口数据 → 更新 HUD 覆盖层；开关关闭/退出编辑器时隐藏
 		ClientPlayNetworking.registerGlobalReceiver(TimelinePayloads.ShowPayload.TYPE, (payload, context) ->

@@ -18,8 +18,10 @@ public final class MusicPayloads {
 	 * 播放：soundId=音效事件id，startMs=起始毫秒，speed=播放速率（保调），volume=音量0~1，
 	 * offsetMs=「全局音乐偏移」（options 计分板 music_offset，服务端执行命令时读取后随包下发；
 	 * 正=音乐延后、负=音乐提前，用于补偿设备输出延迟；多人下每个客户端都拿到同一个值）。
+	 * mapOffsetMs=「谱面音乐偏移」（谱面根字段 music_offset，★ 2026-10-28：
+	 * 正=音乐延后（只有延后没有提前，见《游玩谱面.md》），与全局偏移**独立叠加**）。
 	 */
-	public record PlayPayload(String soundId, int startMs, float speed, float volume, int offsetMs) implements CustomPacketPayload {
+	public record PlayPayload(String soundId, int startMs, float speed, float volume, int offsetMs, int mapOffsetMs) implements CustomPacketPayload {
 		public static final Type<PlayPayload> TYPE = new Type<>(Identifier.parse("rhythm_axe_mod:music_play"));
 		public static final StreamCodec<ByteBuf, PlayPayload> STREAM_CODEC = StreamCodec.composite(
 				ByteBufCodecs.STRING_UTF8, PlayPayload::soundId,
@@ -27,6 +29,7 @@ public final class MusicPayloads {
 				ByteBufCodecs.FLOAT, PlayPayload::speed,
 				ByteBufCodecs.FLOAT, PlayPayload::volume,
 				ByteBufCodecs.VAR_INT, PlayPayload::offsetMs,
+				ByteBufCodecs.VAR_INT, PlayPayload::mapOffsetMs,
 				PlayPayload::new);
 
 		@Override
@@ -84,13 +87,15 @@ public final class MusicPayloads {
 	 * 单人时客户端直接读集成服务端（零延迟）；**多人**下客户端拿不到服务端 storage，
 	 * 就靠服务端每刻推送这个包（只发给收过 /playmusic 的玩家）。
 	 * valid=false 表示当前没有可对齐的播放头（不在编辑/游玩中、对齐开关关闭、读取异常）→ 客户端跳过对齐。
+	 * mapOffsetMs=「谱面音乐偏移」（★ 2026-10-28）：随播放头每刻推送 ⇒ **多人**下改谱面偏移也能实时生效。
 	 */
-	public record HeadPayload(int playheadMs, boolean valid, int offsetMs) implements CustomPacketPayload {
+	public record HeadPayload(int playheadMs, boolean valid, int offsetMs, int mapOffsetMs) implements CustomPacketPayload {
 		public static final Type<HeadPayload> TYPE = new Type<>(Identifier.parse("rhythm_axe_mod:music_head"));
 		public static final StreamCodec<ByteBuf, HeadPayload> STREAM_CODEC = StreamCodec.composite(
 				ByteBufCodecs.VAR_INT, HeadPayload::playheadMs,
 				ByteBufCodecs.BOOL, HeadPayload::valid,
 				ByteBufCodecs.VAR_INT, HeadPayload::offsetMs,
+				ByteBufCodecs.VAR_INT, HeadPayload::mapOffsetMs,
 				HeadPayload::new);
 
 		@Override

@@ -117,6 +117,31 @@ public class RhythmAxeMusic {
      * 退出续播（MusicResume → play()）沿用上次记下的值，无需单独持久化。
      */
     private static int globalOffsetMs = 0;
+    /**
+     * 「谱面音乐偏移」（毫秒，★ 2026-10-28 新增）：谱面根字段 {@code music_offset}，
+     * **与 {@link #globalOffsetMs} 同符号（正 = 音乐延后）且独立叠加**。
+     * 前者是**谱师对音频本身**的对齐（全员一致），后者是**玩家设备延迟**补偿（每人可不同）。
+     * 只有延后没有提前（负数按 0 处理，见《游玩谱面.md》「为什么只有延后」）。
+     */
+    private static int mapOffsetMs = 0;
+    /** 多人：服务端每刻推送的谱面偏移（见 {@link #setPushedPlayhead}）。 */
+    private static int pushedMapOffsetMs = 0;
+    /**
+     * 预卷等待中（★ 2026-10-28）：只有「延后」时，起播那一刻音乐内容位置是负的（还不该出声）⇒
+     * 先不出声，等播放头走到 {@link #prerollTargetHeadMs} 再开声（见 {@link #prerollTick()}）。
+     */
+    private static boolean prerollWaiting;
+    /** 预卷目标：播放头走到这个毫秒就起声（= 总延后量，**绝对值**，不是剩余等待时间）。 */
+    private static int prerollTargetHeadMs;
+    /** 预卷等待的开始时刻（System.currentTimeMillis，日志/超时用）。 */
+    private static long prerollSince;
+    /** 预卷/起播上限（毫秒）：等更久说明不是偏移问题，直接起声，避免永远静音。 */
+    private static final int PREROLL_MAX_MS = 10000;
+    /**
+     * 是否已把缓冲排进队列（★ 2026-10-28）：预卷静音期间为 false。
+     * {@link #audibleMs()} 用它返回 -1 —— 预卷时没有「出声位置」，自动对齐必须跳过。
+     */
+    private static boolean somethingQueued;
     private static float appliedGain = -1f; // 上次写入 AL_GAIN 的值（-1 = 无效值，强制重写）
     private static String currentId;   // 当前曲目（用于反馈）
 	private static long lastPosLogMs;  // 上次位置日志时间戳（诊断）
@@ -173,10 +198,11 @@ public class RhythmAxeMusic {
      * valid=false 表示当前没有可对齐的目标（不在编辑/游玩中、对齐开关关闭、读取异常）。
      * offsetMs = 服务端当前的全局音乐偏移（★ 2026-10-17：随包每刻推送 ⇒ 播放中改设置也能实时生效）。
      */
-    public static void setPushedPlayhead(int playheadMs, boolean valid, int offsetMs) {
+    public static void setPushedPlayhead(int playheadMs, boolean valid, int offsetMs, int mapOffsetMs) {
         pushedHeadMs = valid ? Math.max(playheadMs, 0) : -1;
         pushedHeadAt = System.currentTimeMillis();
         pushedOffsetMs = offsetMs;
+        pushedMapOffsetMs = mapOffsetMs;
         pushedOffsetAt = pushedHeadAt;
     }
 
@@ -187,7 +213,7 @@ public class RhythmAxeMusic {
      * 与 {@link #queuedMs()} 的差 = 声卡排队深度（诊断用；排队位置天然提前若干缓冲）。
      */
     public static int audibleMs() {
-        if (pcm == null || source == 0 || !playing || sampleRate <= 0) {
+        if (pcm == null || source == 0 || !playing || sampleRate <= 0 || !somethingQueued) {
             return -1;
         }
         int offset = org.lwjgl.openal.AL11.alGetSourcei(source, org.lwjgl.openal.AL11.AL_SAMPLE_OFFSET);
@@ -197,7 +223,7 @@ public class RhythmAxeMusic {
 
     /** 已「排队」的位置（毫秒）：比出声位置提前若干缓冲。未播放返回 -1。 */
     public static int queuedMs() {
-        if (pcm == null || !playing || sampleRate <= 0) {
+        if (pcm == null || !playing || sampleRate <= 0 || !somethingQueued) {
             return -1;
         }
         return (int) (outPos * speed * 1000.0 / sampleRate);
@@ -267,7 +293,8 @@ public class RhythmAxeMusic {
         //   把目标整体下移半刻 ⇒ 音频相位误差在 [−Δ/2, +Δ/2] 摆动，最大提前量减半、听感居中。
         // ★ globalOffsetMs（全局音乐偏移，常数；正 = 音乐延后）也必须加进 center（符号同起播锚点，取负号）：
         //   不加的话自动对齐会在 1 秒内把起播锚点里加的偏移抹掉（对齐目标 = 音频该在的位置，两处必须同一套约定）。
-        int center = Math.round((effPhase - 0.5f) * tickSrcMs) + syncOffsetApplied() - globalOffsetMs;
+        // ★ mapOffsetMs（谱面音乐偏移，★ 2026-10-28）同一约定、同一符号：这里同样**减**。
+        int center = Math.round((effPhase - 0.5f) * tickSrcMs) + syncOffsetApplied() - globalOffsetMs - mapOffsetMs;
         // ★ 容差必须 ≥ 半个刻：先前的 20ms 比「期望领先」还小 ⇒ 连 3ms 的正常摆动都被判成偏差，
         //   每一次修正都把音频往前推一次，越修越提前（日志里 [MusicAlign] 偏差 -3ms 就是它）。
         int tol = Math.max(ALIGN_TOLERANCE_MS, Math.round(tickSrcMs / 2f) + 10);
@@ -291,8 +318,8 @@ public class RhythmAxeMusic {
         long now = System.currentTimeMillis();
         if (now - lastPosLogMs >= 1000) {
             lastPosLogMs = now;
-            LOGGER.info("[MusicPos] 出声={}ms 播放头={}ms delta={}ms 期望={}ms 残差={}ms 有效={}ms 相位={} 每刻音乐={}ms 变速偏移={}ms 全局偏移={}ms speed={}",
-                    audible, playheadMs, delta, center, seekResidual, eff, String.format("%.2f", phase), tickSrcMs, syncOffsetApplied(), globalOffsetMs, speed);
+            LOGGER.info("[MusicPos] 出声={}ms 播放头={}ms delta={}ms 期望={}ms 残差={}ms 有效={}ms 相位={} 每刻音乐={}ms 变速偏移={}ms 全局偏移={}ms 谱面偏移={}ms speed={}",
+                    audible, playheadMs, delta, center, seekResidual, eff, String.format("%.2f", phase), tickSrcMs, syncOffsetApplied(), globalOffsetMs, mapOffsetMs, speed);
         }
         if (alignStreak == 0) {
             alignStreak = 1;
@@ -444,8 +471,8 @@ public class RhythmAxeMusic {
         }
         lastPosLogMs = now;
         int phMs = (int) MusicTime.headMs(server, tick);
-        LOGGER.info("[MusicPos] (对齐关) 出声={}ms 播放头={}ms delta={}ms speed={} 变速偏移={}ms 全局偏移={}ms",
-                audible, phMs, audible - phMs, speed, syncOffsetApplied(), globalOffsetMs);
+        LOGGER.info("[MusicPos] (对齐关) 出声={}ms 播放头={}ms delta={}ms speed={} 变速偏移={}ms 全局偏移={}ms 谱面偏移={}ms",
+                audible, phMs, audible - phMs, speed, syncOffsetApplied(), globalOffsetMs, mapOffsetMs);
     }
 
     /**
@@ -508,6 +535,7 @@ public class RhythmAxeMusic {
         boolean wasPlaying = playing;
         AL10.alSourceStop(source);
         unqueueAll();
+        somethingQueued = false;
         outPos = Math.floor(targetFrame / speed);
         outputBase = outPos;   // 出声位置重新以新起点为基准
         playedBuffers = 0;
@@ -516,6 +544,7 @@ public class RhythmAxeMusic {
             for (int i = 0; i < BUFFER_COUNT; i++) {
                 queueNext(buffers[i]);
             }
+            somethingQueued = true;
             AL10.alSourcePlay(source);
         }
         return true;
@@ -527,6 +556,15 @@ public class RhythmAxeMusic {
      */
     public static void setGlobalOffsetMs(int ms) {
         globalOffsetMs = ms;
+    }
+
+    /**
+     * 记下服务端下发的「谱面音乐偏移」（毫秒，★ 2026-10-28；正 = 音乐延后，负数按 0）。
+     * 与 {@link #setGlobalOffsetMs} 同符号、独立叠加；作用于起播锚点、预卷静音与自动对齐目标。
+     * 播放中改值由 {@link #refreshLiveOffsets} 平移音频（编辑器面板点 ± 能当场听到）。
+     */
+    public static void setMapOffsetMs(int ms) {
+        mapOffsetMs = Math.max(0, ms);
     }
 
     /** 播放音效事件。startMs=起始毫秒，speed=播放速率（保调），volume=音量0~1。 */
@@ -606,9 +644,31 @@ public class RhythmAxeMusic {
         //   这样「播放 / 快进快退（resync 重下 playmusic）/ 暂停→播放」都走同一条对齐好的路径。
         // ★ globalOffsetMs（全局音乐偏移）与 syncOffsetApplied() 叠加，但符号相反：
         //   本值语义 = 正「音乐延后」/ 负「音乐提前」（2026-10-17 与最初的「正=提前」交换）⇒ 这里要**减**。
-        int offsetMs = syncOffsetApplied() - globalOffsetMs;
+        // ★ mapOffsetMs（谱面音乐偏移，★ 2026-10-28）：同符号同约定，一并**减**。
+        int offsetMs = syncOffsetApplied() - globalOffsetMs - mapOffsetMs;
         if (offsetMs != 0) {
-            startMs = Math.max(0, startMs + offsetMs);
+            startMs = startMs + offsetMs;
+        }
+        // ★★ 预卷静音（★ 2026-10-28，配合「只有延后」的谱面音乐偏移）：
+        //   startMs 变成负数 ⇒ 此刻音乐内容还没该出声（播放头还没走到「延后量」那么久）。
+        //   旧写法 `Math.max(0, …)` 会把负值夹成 0 ⇒ **延后完全失效**（音乐照旧准点从文件开头响），
+        //   而且自动对齐会把「本应有的延后」当成偏差，反复往回拽又被夹住，最终留下一个恒定的提前量。
+        //   正确做法：不夹取，记下「音乐内容该到哪个毫秒才起声」（= 播放头 − 总延后量），
+        //   等播放头走到那儿再把音频从对应位置排入队列（见 {@link #prerollTick()}）。
+        //   上限保护：等太久说明不是偏移问题（比如换歌/错位），回退成从文件开头起播。
+        prerollWaiting = false;
+        prerollTargetHeadMs = 0;
+        if (startMs < 0) {
+            // 音乐内容位置 < 0 ⇒ 播放头还没走到「总延后量」那么远。遭掩护：超过上限就放弃等待。
+            int totalDefer = -offsetMs;   // = mapOffsetMs + globalOffsetMs − syncOffsetApplied()
+            if (totalDefer <= PREROLL_MAX_MS) {
+                prerollWaiting = true;
+                prerollTargetHeadMs = totalDefer;
+                prerollSince = System.currentTimeMillis();
+                startMs = 0;   // 落点定在文件开头，等播放头顶上来再真正开声
+            } else {
+                startMs = 0;
+            }
         }
         pcm = data.pcm;
         channels = data.channels;
@@ -635,16 +695,113 @@ public class RhythmAxeMusic {
         outputBase = outPos;   // 出声位置 = outputBase + 已播完缓冲 + 当前缓冲内偏移
         playedBuffers = 0;
         finished = false;
-        // 不刷「正在播放...」反馈（seek/播放重开时避免每次刷一条，保持与暂停一致静默）
-        for (int i = 0; i < BUFFER_COUNT; i++) {
-            queueNext(buffers[i]);
-        }
-        AL10.alSourcePlay(source);
-        playing = true;
+        somethingQueued = false;
         alignStreak = 0;
         alignCooldown = 0;   // 新一次播放：允许自动对齐从头判定
         seekResidual = 0;    // 新一次播放：落点残差重新学
         seekPending = false;
+        if (prerollWaiting) {
+            // ★ 预卷静音：播放头还没走到「延后量」那一刻 ⇒ 先不出声（playing=true 表示「意图在播」，
+            //   audibleMs() 因 somethingQueued=false 会返回 -1，对齐自动跳过；prerollTick 到点开声）。
+            playing = true;
+            LOGGER.info("[MusicPreroll] 音乐延后 {}ms → 等播放头走到 {}ms 再起声（谱面偏移 {}ms / 全局偏移 {}ms / 变速偏移 {}ms）",
+                    prerollTargetHeadMs, prerollTargetHeadMs, mapOffsetMs, globalOffsetMs, syncOffsetApplied());
+            return;
+        }
+        // 不刷「正在播放...」反馈（seek/播放重开时避免每次刷一条，保持与暂停一致静默）
+        for (int i = 0; i < BUFFER_COUNT; i++) {
+            queueNext(buffers[i]);
+        }
+        somethingQueued = true;
+        AL10.alSourcePlay(source);
+        playing = true;
+    }
+
+    /**
+     * 预卷静音到点检查（★ 2026-10-28）：等「播放头 − 总延后量」走到 0 再真正起声。
+     *
+     * <p>为什么要等：只有「延后」时，`time = 0` 那一刻音乐内容位置是 **负** 的（还不该出声）。
+     * 直接夹成 0 就等于没延后，且会让自动对齐误判。这里改成「先静音等，到点从文件开头播」。
+     *
+     * <p>播放头每刻只是一个阶梯值，取到它就开声会让起声点最多晚一整刻（≤50ms）；这点残差交给
+     * {@link #alignTick()} 收敛（它本来就能容忍/修正一个刻内的偏差）。超时（{@link #PREROLL_MAX_MS}
+     * × 若干倍，说明游戏时钟没往前走，比如暂停/卡死）则直接开声，避免永远静音。
+     */
+    private static void prerollTick() {
+        if (!prerollWaiting || pcm == null) {
+            return;
+        }
+        int headMs = gamePlayheadMsNoSwitch();
+        if (headMs >= 0 && headMs >= prerollTargetHeadMs) {
+            finishPreroll();
+            return;
+        }
+        if (System.currentTimeMillis() - prerollSince > (long) PREROLL_MAX_MS * 3L) {
+            LOGGER.warn("[MusicPreroll] 等待超时（目标 {}ms，当前播放头 {}ms）→ 立即起声", prerollTargetHeadMs, headMs);
+            finishPreroll();
+        }
+    }
+
+    /**
+     * 结束预卷等待：从「音乐内容此刻应该走到哪」排入队列并开声。
+     *
+     * <p>★ 不要总是从 0ms 起声：预卷只在**每客户端刻**检查一次，发现时播放头往往已越过目标
+     * 一整刻（这里实测晚了 ~85ms）。若仍从 0ms 起声，音乐就永久晚这一整段，只能靠
+     * {@link #alignTick()} 一次次 seek 拉回来（日志里 delta 在 −274/−128/−325 间揃，听感像在抽）。
+     * ⇒ 起播位置 = `播放头 − 预卷目标`（音乐源毫秒，已是同一时间轴）。
+     */
+    private static void finishPreroll() {
+        prerollWaiting = false;
+        int startMs = 0;
+        int headMs = gamePlayheadMsNoSwitch();
+        if (headMs >= 0 && prerollTargetHeadMs > 0) {
+            startMs = Math.max(0, headMs - prerollTargetHeadMs);
+        }
+        prerollTargetHeadMs = 0;
+        startAtMs(startMs);
+    }
+
+    /** 从指定源毫秒排入首批缓冲并开声（预卷结束时用；进度条/对齐参数一并复位）。 */
+    private static void startAtMs(int startMs) {
+        ensureAl();
+        if (source == 0 || pcm == null) {
+            return;
+        }
+        AL10.alSourceStop(source);
+        unqueueAll();
+        int frameCount = pcm.length / channels;
+        double startFrame = Math.min(Math.max(0, startMs) * (double) sampleRate / 1000.0,
+                Math.max(0, frameCount - 1));
+        outPos = Math.floor(startFrame / speed);
+        outputBase = outPos;
+        playedBuffers = 0;
+        finished = false;
+        for (int i = 0; i < BUFFER_COUNT; i++) {
+            queueNext(buffers[i]);
+        }
+        somethingQueued = true;
+        AL10.alSourcePlay(source);
+        playing = true;
+        alignStreak = 0;
+        alignCooldown = 0;
+        seekResidual = 0;
+        seekPending = false;
+        LOGGER.info("[MusicPreroll] 到点起声，内容位置 {}ms", startMs);
+    }
+
+    /** 当前游戏播放头毫秒（**不看对齐开关**；单人直读服务端，多人用推送值）。预卷用。 */
+    private static int gamePlayheadMsNoSwitch() {
+        try {
+            Minecraft mc = Minecraft.getInstance();
+            MinecraftServer server = mc == null ? null : mc.getSingleplayerServer();
+            if (server != null) {
+                return MusicTime.gamePlayheadMsNoSwitch(server);
+            }
+        } catch (Exception ignored) {
+            // 落到推送值
+        }
+        return System.currentTimeMillis() - pushedHeadAt <= PUSHED_HEAD_TTL_MS
+                ? pushedHeadMs + (int) Math.round(halfPingMs() * (double) speed) : -1;
     }
 
     /**
@@ -686,7 +843,71 @@ public class RhythmAxeMusic {
         maybeClearCacheOnReload(mc);
         pendingTick();
         refreshGlobalOffset(mc);   // ★ 2026-10-17：全局偏移每刻同步（播放中改值立即生效）
+        refreshLiveOffsets(mc);    // ★ 2026-10-28：谱面偏移每刻同步（编辑器面板点 ± 当场生效）
+        prerollTick();             // ★ 2026-10-28：预卷静音到点开声（只有延后的那部分）
         alignTick();
+    }
+
+    /**
+     * 每刻同步「谱面音乐偏移」（★ 2026-10-28）：让编辑器谱面设置面板里点 ± 能**当场听到**效果。
+     *
+     * <p>读取优先级：<b>单机</b> → {@link MusicTime#mapMusicOffsetMs}（编辑器面板暂存值 → 工作副本 → 游玩 runtime）；
+     * <b>多人</b> → 服务端每刻随播放头推来的值（{@link #setPushedPlayhead}）。
+     *
+     * <p>值一变且正在出声 ⇒ 把音频整体平移 `(旧 − 新)` 毫秒（同 {@link #refreshGlobalOffset}：
+     * 目标 `center` 里 offset 变大 d ⇒ 音频内容要后退 d，听感延后 d）。
+     * 若新的延后量比当前播放头还大（本该先静音等），不强行平移，留给下一次起播/预卷处理。
+     */
+    private static void refreshLiveOffsets(Minecraft mc) {
+        int latest = readLiveMapOffset(mc);
+        if (latest == Integer.MIN_VALUE || latest == mapOffsetMs) {
+            return;
+        }
+        int old = mapOffsetMs;
+        mapOffsetMs = Math.max(0, latest);
+        if (!playing || pcm == null || !somethingQueued) {
+            if (prerollWaiting) {
+                // 预卷等待中改值 → 目标改成新的总延后量（到点由 prerollTick 开声）
+                prerollTargetHeadMs = Math.max(0, mapOffsetMs + globalOffsetMs - syncOffsetApplied());
+                if (prerollTargetHeadMs == 0) {
+                    finishPreroll();
+                }
+            }
+            return;
+        }
+        int audible = audibleMs();
+        if (audible < 0) {
+            return;
+        }
+        int delta = old - mapOffsetMs;   // 正 = 新值更小（音乐该提前）→ 内容前进
+        if (delta == 0) {
+            return;
+        }
+        int target = Math.max(0, audible + delta);
+        if (seekAudioTo(target)) {
+            seekPending = true;   // 落点残差重新学
+            alignStreak = 0;
+            LOGGER.info("[MusicOffset] 谱面偏移 {} → {}ms（实时生效），音频已挪到 {}ms", old, mapOffsetMs, target);
+        }
+    }
+
+    /**
+     * 当前**实时**谱面偏移（毫秒）：单机直读 storage 优先，其次用服务端每刻推送值；
+     * 都拿不到返回 {@link Integer#MIN_VALUE}（哨兵，调用方保持原值）。
+     */
+    private static int readLiveMapOffset(Minecraft mc) {
+        try {
+            MinecraftServer server = mc == null ? null : mc.getSingleplayerServer();
+            if (server != null) {
+                return MusicTime.mapMusicOffsetMs(server);
+            }
+        } catch (Throwable ignored) {
+            // 落到推送值
+        }
+        if (System.currentTimeMillis() - pushedOffsetAt <= PUSHED_HEAD_TTL_MS) {
+            return pushedMapOffsetMs;
+        }
+        return Integer.MIN_VALUE;
     }
 
     /**
@@ -708,6 +929,14 @@ public class RhythmAxeMusic {
         globalOffsetMs = latest;
         if (!playing || pcm == null) {
             return;   // 没在播：只更新目标值，下次起播会用新值
+        }
+        // ★ 预卷静音等待中（2026-10-28）：没有出声位置可挪 ⇒ 只重算目标
+        if (prerollWaiting) {
+            prerollTargetHeadMs = Math.max(0, mapOffsetMs + globalOffsetMs - syncOffsetApplied());
+            if (prerollTargetHeadMs == 0) {
+                finishPreroll();
+            }
+            return;
         }
         int audible = audibleMs();
         if (audible < 0) {
@@ -752,6 +981,16 @@ public class RhythmAxeMusic {
             pendingId = null;   // 还在解码等待中就被暂停 → 不再补播
             return;
         }
+        // ★ 预卷静音期间按暂停：没有排队缓冲，只需停掉「等待」并记住意图（resume 时重新等）
+        if (prerollWaiting) {
+            prerollWaiting = false;
+            prerollTargetHeadMs = 0;
+            playing = false;
+            AL10.alSourceStop(source);
+            unqueueAll();
+            somethingQueued = false;
+            return;
+        }
         // ★ 排队位置（outPos）比真正「出声」的位置提前若干缓冲（约 300ms）。停之前必须把 outPos
         //   拉回出声位置：unqueueAll 会丢掉「已排入但还没播出去」的那几个缓冲，若仍按 outPos 续播，
         //   那段音乐就凭空消失 → 续播瞬间音乐前跳（实测暂停一次后偏差 +59~+129ms，音乐超前）。
@@ -766,6 +1005,7 @@ public class RhythmAxeMusic {
         // 播放位置由 outPos 记录，恢复时重新排队即可精确续播。
         AL10.alSourceStop(source);
         unqueueAll();
+        somethingQueued = false;
         playing = false;
         // 不再弹客户端聊天消息：与 playmusic 一致 —— 客户端反馈无法区分执行者，
         // 数据包（编辑器暂停/到尾自动暂停）调用时不该刷聊天栏；玩家手动 /pausemusic 时由服务端 feedbackIfPlayer 反馈。
@@ -778,11 +1018,29 @@ public class RhythmAxeMusic {
         }
         // 上下文可能已重建（设备切换/重载），确保作用于有效 source。
         ensureAl();
+        // ★ 续播时重新计算「该不该先静音等」：暂停期间播放头会继续走，
+        //   这里按当前播放头重算一次预卷，避免延后量在续播时被吃掉。
+        //   总延后量 = −(起播锚点里加的那一项)，与 startWithData 同一公式。
+        int delay = mapOffsetMs + globalOffsetMs - syncOffsetApplied();
+        if (outPos <= 0 && delay > 0) {
+            int headMs = gamePlayheadMsNoSwitch();
+            if (headMs >= 0 && headMs < delay) {
+                prerollWaiting = true;
+                prerollTargetHeadMs = delay;
+                prerollSince = System.currentTimeMillis();
+                somethingQueued = false;
+                playing = true;
+                alignStreak = 0;
+                alignCooldown = 0;
+                return;
+            }
+        }
         outputBase = outPos;   // 续播：从当前排队位置重新计出声位置
         playedBuffers = 0;
         for (int i = 0; i < BUFFER_COUNT; i++) {
             queueNext(buffers[i]);
         }
+        somethingQueued = true;
         AL10.alSourcePlay(source);
         playing = true;
         alignStreak = 0;
@@ -799,6 +1057,9 @@ public class RhythmAxeMusic {
         pcm = null;
         playing = false;
         finished = false;
+        somethingQueued = false;
+        prerollWaiting = false;
+        prerollTargetHeadMs = 0;
         baseVolume = 1f;
         appliedGain = -1f;
         currentId = null;
@@ -823,6 +1084,10 @@ public class RhythmAxeMusic {
         }
         // ★ 跟随游戏内音量设置（玩家拖动「音乐」/「主音量」滑块即时生效）
         refreshGain();
+        // ★ 预卷静音等待中（2026-10-28）：没有排队缓冲，不需要回收/续排（prerollTick 到点开声）
+        if (prerollWaiting) {
+            return;
+        }
         // ★ 音频设备切换/资源包重载/重进存档 → MC 重建 AL 上下文 → 旧 source 失效。
         //   检测到即重建并从中断处续播（否则切换播放设备后音乐静默停止，不跟随新设备）。
         if (!AL10.alIsSource(source)) {
@@ -1075,10 +1340,16 @@ public class RhythmAxeMusic {
     /** 上下文重建（音频设备切换/重载/重进存档）后旧 source 失效：重建并按 outPos 无缝续播。 */
     private static void reattachOnStaleSource() {
         createSourceBuffers();
+        // ★ 预卷静音等待中（2026-10-28）：不该出声，别排缓冲（prerollTick 会到点开声）
+        if (prerollWaiting) {
+            somethingQueued = false;
+            return;
+        }
         // queueNext 完全由 outPos 决定（无累计状态），重建后可从中断处无缝继续。
         for (int i = 0; i < BUFFER_COUNT; i++) {
             queueNext(buffers[i]);
         }
+        somethingQueued = true;
         if (playing) {
             AL10.alSourcePlay(source);
         }

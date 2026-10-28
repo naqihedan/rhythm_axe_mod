@@ -196,15 +196,19 @@ public class RhythmAxeMod implements ModInitializer {
 		//   随 PlayPayload 下发给每个客户端 ⇒ 单人/多人统一生效（客户端不自己去读计分板）。
 		//   语义：正 = 音乐延后、负 = 音乐提前（2026-10-17 交换过符号）；作用于起播锚点与自动对齐目标。
 		int offsetMs = readMusicOffset(source.getServer());
+		// ★ 「谱面音乐偏移」（谱面根字段 music_offset，★ 2026-10-28）：同符号（正 = 音乐延后）、独立叠加。
+		//   读取优先级见 MusicTime.mapMusicOffsetMs（编辑器暂存值 → 工作副本 → 游玩 runtime → 0）。
+		int mapOffsetMs = MusicTime.mapMusicOffsetMs(source.getServer());
 
 		for (ServerPlayer player : players) {
-			ServerPlayNetworking.send(player, new MusicPayloads.PlayPayload(soundId.toString(), startMs, speed, volume, offsetMs));
+			ServerPlayNetworking.send(player, new MusicPayloads.PlayPayload(soundId.toString(), startMs, speed, volume, offsetMs, mapOffsetMs));
 			musicHeadTargets.add(player.getUUID());   // 开始推送「游戏播放头」（多人对齐用）
 		}
 		int count = players.size();
 		feedbackIfPlayer(source, Component.literal("已向 " + count + " 名玩家发送播放：" + soundId
 				+ "（" + startTick + "tick → " + startMs + "ms，" + convLabel + "，速度×" + speed + "，音量" + volume
-				+ (offsetMs != 0 ? "，偏移" + offsetMs + "ms" : "") + "）"));
+				+ (offsetMs != 0 ? "，偏移" + offsetMs + "ms" : "")
+				+ (mapOffsetMs != 0 ? "，谱面偏移" + mapOffsetMs + "ms" : "") + "）"));
 		return count;
 	}
 
@@ -275,7 +279,9 @@ public class RhythmAxeMod implements ModInitializer {
 			// ★ 2026-10-17：顺带推「全局音乐偏移」（每刻一个）⇒ 客户端能在**播放中**实时跟随设置变化，
 			//   不必等下一次 /playmusic（单人客户端会优先直读计分板，这里主要是给多人用）
 			int offsetMs = readMusicOffset(server);
-			MusicPayloads.HeadPayload payload = new MusicPayloads.HeadPayload(Math.max(headMs, 0), headMs >= 0, offsetMs);
+			// ★ 2026-10-28：谱面音乐偏移同样每刻推（编辑器面板改值 ⇒ 多人也能实时听到）
+			int mapOffsetMs = MusicTime.mapMusicOffsetMs(server);
+			MusicPayloads.HeadPayload payload = new MusicPayloads.HeadPayload(Math.max(headMs, 0), headMs >= 0, offsetMs, mapOffsetMs);
 			for (UUID id : musicHeadTargets) {
 				ServerPlayer player = server.getPlayerList().getPlayer(id);
 				if (player == null) {
@@ -328,6 +334,7 @@ public class RhythmAxeMod implements ModInitializer {
 				source.sendSuccess(() -> Component.literal("  §7开关 = options 计分板 §faudio_align§7（1=开，0=关；编辑器试听与游玩共用）"), false);
 				source.sendSuccess(() -> Component.literal("  §7标定 = options 计分板 §faudio_sync_offset§7（默认 §f-50§7 = 0.25x 下所需补偿；按 (1−速度)/0.75 缩放，1x 自动归零）"), false);
 				source.sendSuccess(() -> Component.literal("  §7全局音乐偏移 = options 计分板 §fmusic_offset§7（默认 §f0§7；§f正=音乐延后§7、负=音乐提前，声音晚到的设备填负值；常数，不随速度缩放）"), false);
+				source.sendSuccess(() -> Component.literal("  §7谱面音乐偏移 = 谱面根字段 §fmusic_offset§7（§f正=音乐延后§7，§f只有延后没有提前§7；§ftime=0 起先静音该毫秒再出声，与全局偏移独立叠加）"), false);
 				source.sendSuccess(() -> Component.literal("  §7起播/快进快退/暂停→播放 都走同一条锚点路径，偏移同样生效"), false);
 				source.sendSuccess(() -> Component.literal("  §7单人直接读服务端；多人由服务端每刻推送播放头（music_head 包）"), false);
 				source.sendSuccess(() -> Component.literal(""), false);

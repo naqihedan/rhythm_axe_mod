@@ -82,10 +82,26 @@ public final class MusicTime {
 	 */
 	public static int gamePlayheadMs(MinecraftServer server) {
 		try {
-			boolean editing = editorActive(server);
-			if (!optionEnabled(server, "audio_align")) {
+			if (!alignEnabled(server)) {
 				return -1;
 			}
+			return gamePlayheadMsNoSwitch(server);
+		} catch (Exception ignored) {
+			return -1;
+		}
+	}
+
+	/**
+	 * 同 {@link #gamePlayheadMs} 但**不看对齐开关**（★ 2026-10-28 新增）。
+	 *
+	 * <p>用途：「谱面音乐偏移」的正值（音乐延后）需要客户端**预卷静音**——等播放头走到
+	 * 「偏移量」所在时刻再起声。这个等待必须能读到播放头，而播放头读取原本被
+	 * `audio_align` 开关整体挡住（关掉对齐就连播放头都拿不到）。所以这里把开关判定拆出去：
+	 * 对齐用 {@link #gamePlayheadMs}（受开关管），预卷用本方法（不受开关管）。
+	 */
+	public static int gamePlayheadMsNoSwitch(MinecraftServer server) {
+		try {
+			boolean editing = editorActive(server);
 			int tick = editing ? editorPlayheadTick(server) : playTick(server);
 			if (tick < 0) {
 				return -1;   // 游玩：time<0 表示音乐还没开始，没有可对齐的目标
@@ -94,6 +110,11 @@ public final class MusicTime {
 		} catch (Exception ignored) {
 			return -1;
 		}
+	}
+
+	/** 「音乐对齐游戏」开关（options 计分板 {@code audio_align}；0=关，缺失/其它=开）。 */
+	public static boolean alignEnabled(MinecraftServer server) {
+		return optionEnabled(server, "audio_align");
 	}
 
 	/**
@@ -105,6 +126,58 @@ public final class MusicTime {
 			return editorPlayheadTick(server);
 		}
 		return playTick(server);
+	}
+
+	/**
+	 * **谱面音乐偏移**（毫秒，★ 2026-10-28 新增；正 = 音乐延后，负数按 0 处理）。
+	 *
+	 * <p>与 options 计分板的「全局音乐偏移」({@code music_offset}) **同符号、独立叠加**：
+	 * 本值是**谱面数据**的一部分（所有玩家一致，谱师对音频本身的对齐），
+	 * 全局值是**玩家设备延迟补偿**（每人可不同）。
+	 *
+	 * <p>读取优先级（与 {@link #gamePlayheadMs} 同一套「编辑器优先、其次游玩」上下文判定）：
+	 * <ol>
+	 *   <li>正在编辑 → {@code maps.editor.panel_temp.music_offset}（谱面设置面板打开着 ⇒ 用**未保存的暂存值**，
+	 *       这样边听边点 ± 能立刻听到效果）；</li>
+	 *   <li>其次 → {@code maps.editor.history[history_cursor].music_offset}（工作副本）；</li>
+	 *   <li>正在游玩 → {@code rhythm_axe:runtime.music_offset}（开局从谱面 merge 进来）；</li>
+	 *   <li>都不在 / 字段缺失 / 异常 → 0（不偏移）。</li>
+	 * </ol>
+	 */
+	public static int mapMusicOffsetMs(MinecraftServer server) {
+		try {
+			CompoundTag editor = server.getCommandStorage().get(EDITOR_STORAGE);
+			if (editor != null && editor.getBooleanOr("active", false)) {
+				// ① 面板设置暂存值（未保存也生效，便于实时试听）
+				Optional<CompoundTag> panel = editor.getCompound("panel_temp");
+				if (panel.isPresent() && panel.get().contains("music_offset")) {
+					return Math.max(0, panel.get().getIntOr("music_offset", 0));
+				}
+				// ② 工作副本（已保存/已确认的值）
+				Optional<ListTag> history = editor.getList("history");
+				if (history.isPresent()) {
+					ListTag list = history.get();
+					int cursor = editor.getIntOr("history_cursor", 0);
+					if (cursor >= 0 && cursor < list.size()) {
+						CompoundTag snapshot = list.getCompoundOrEmpty(cursor);
+						if (snapshot.contains("music_offset")) {
+							return Math.max(0, snapshot.getIntOr("music_offset", 0));
+						}
+					}
+				}
+			}
+			// ③ 正在游玩才读 runtime（★ 否则会捡到**上一局的残留值**：end_of_game 不清 runtime，
+			//    大厅【▶ 预览】里读到的会是上一张谱面的 music_offset，听起来偏移无故生效）
+			if (playTick(server) != Integer.MIN_VALUE) {
+				CompoundTag runtime = server.getCommandStorage().get(RUNTIME_STORAGE);
+				if (runtime != null && runtime.contains("music_offset")) {
+					return Math.max(0, runtime.getIntOr("music_offset", 0));
+				}
+			}
+		} catch (Exception ignored) {
+			// 存储异常 → 不偏移
+		}
+		return 0;
 	}
 
 	/**
