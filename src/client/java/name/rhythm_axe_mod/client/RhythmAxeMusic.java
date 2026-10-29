@@ -75,7 +75,38 @@ public class RhythmAxeMusic {
      * 注意这是「允许音乐内容偏多少毫秒」，不随播放速率缩放：慢了（0.25x）时同样的音乐毫秒
      * 对应 4 倍真实时间，所以容差宁紧勿松，否则残留会被放大成可听的延后。
      */
-    private static final int ALIGN_TOLERANCE_MS = 20;
+    private static final int ALIGN_TOLERANCE_MS = 8;
+    /**
+     * 容差下限的**刻长占比**（★ 2026-10-29 二次收紧）：`tol = max({@link #ALIGN_TOLERANCE_MS}, 每刻音乐 × 本值 + 2)`。
+     *
+     * <p>演进：0.5（慢放标定期）→ 0.25（平滑后首次收紧，1x 得 17ms）→ **0.15**（本值，1x 得 ~10ms）。
+     * 敢继续收的前提：① 有效偏差已做指数平滑（噪声抵消）；② seek 残差已改成只测「纯落点误差」
+     * （旧写法会把未修完的真实偏差吃掉 ⇒ 系统误以为已对齐、永不收敛）。
+     * 用户要求 10ms 以内，且已实测能稳定在 +20ms 不再漂移，因此再收一档到 ~10ms。
+     */
+    private static final float ALIGN_TOL_TICK_RATIO = 0.15f;
+    /**
+     * **迟滞比例**（★ 2026-10-29）：「触发修正」和「放弃攒刻」用两套门槛。
+     *
+     * <p>`tol` 是触发门槛（偏差超过它就算「需要修」），但**清空计数**要用更窄的门槛
+     * {@code tol × 本值}。原因：偏差卡在 tol 附近摆动时（实测 41~49ms vs tol 36ms），
+     * 任何一次向下抖动都会把 `alignStreak` 清零 ⇒ 永远攒不满 {@link #ALIGN_STREAK_TICKS} 刻
+     * ⇒ 明明听得出来却一次都不修（日志里只有 [MusicPos] 不断出现，从不见 [MusicAlign]）。
+     */
+    private static final float ALIGN_RESET_RATIO = 0.6f;
+    /**
+     * 是否保留「**居中半刻**」偏置（★ 2026-10-29 改为**默认关闭**，可在 options 计分板
+     * {@code audio_center_half_tick} 设为 1 重新启用）。
+     *
+     * <p>历史原因：目标是「刻边界处 delta = 0」，但那样在刻内音频会一路领先到整刻
+     * （慢放时每刻真实时间被拉长 ⇒ 听感“音乐抢拍”），所以把目标整体下移半刻。
+     *
+     * <p>代价：**任何速率下都恒定把音乐往后压半刻**（1x / 52ms 刻长 → 26ms）。这个量在
+     * 144BPM 8tpb（每刻 52ms）下是可听的，且它让「刻边界完全对齐」永远显示成 +26ms，
+     * 破坏了「用日志判断真实偏差」的能力。因此 1x（speed=1）时关掉它，只在变速播放时启用
+     * —— 那时半刻被拉长到几十上百 ms，居中才真正有价值。
+     */
+    private static final boolean CENTER_HALF_TICK_AT_1X = false;
     /** 需连续超阈的刻数（0.5s）才动手：避开「开局世界加载」那种一过性震荡。 */
     private static final int ALIGN_STREAK_TICKS = 20;
     /**
@@ -90,6 +121,18 @@ public class RhythmAxeMusic {
     private static final int ALIGN_MAX_STEP_MS = 400;
     /** 对齐后的冷却刻数（0.5s）：避免反复微调造成的可闻抖动。 */
     private static final int ALIGN_COOLDOWN_TICKS = 20;
+    /**
+     * 偏差**上限保护**（音乐 ms，★ 2026-10-29）：`|delta|` 超过它就直接跳过对齐。
+     * 实测 `/reload` 时播放头归零、音乐还在播 ⇒ delta 冒出 102981ms，若不拦会让对齐把音乐挪飞。
+     */
+    private static final int ALIGN_MAX_DELTA_MS = 3000;
+    /**
+     * 出窗期间 [MusicPos] 的「重新打印」门槛（音乐 ms，★ 2026-10-29）：偏差变化不到这个量就不打。
+     * 目的：稳态偏差刚好卡在容差外一点点时（实测 41~49ms vs 容差 36ms），不再每刻刷一行。
+     */
+    private static final int POS_LOG_REBUCKET_MS = 25;
+    /** 出窗期间 [MusicPos] 的心跳间隔（ms，★ 2026-10-29）：偏差没变化时最多这么久补一行，证明还活着。 */
+    private static final long POS_LOG_HEARTBEAT_MS = 10_000;
     /** 多人推送值（{@link #setPushedPlayhead}）的有效期（ms）：服务端每刻推一次，这么久没更新就当失效。 */
     private static final int PUSHED_HEAD_TTL_MS = 500;
     /** 延迟补偿上限（ms）：ping/2 超过它就不补了（避免异常 ping 值把播放头拽飞）。 */
@@ -145,11 +188,39 @@ public class RhythmAxeMusic {
     private static float appliedGain = -1f; // 上次写入 AL_GAIN 的值（-1 = 无效值，强制重写）
     private static String currentId;   // 当前曲目（用于反馈）
 	private static long lastPosLogMs;  // 上次位置日志时间戳（诊断）
+	/**
+	 * 上一次打印 [MusicPos] 时的「有效偏差」桶（★ 2026-10-29）：出窗期间不再每秒刷一行，
+	 * 只有偏差**换了档次**（变化 ≥ {@link #POS_LOG_REBUCKET_MS}）或超过 {@link #POS_LOG_HEARTBEAT_MS}
+	 * 才补一行。回到窗内时置 {@link Integer#MIN_VALUE} 表示「下次出窗必打首行」。
+	 *
+	 * <p>起因：稳态偏差刚好停在容差外一点点（实测 41~49ms vs 容差 36ms）时，每一刻都被判成出窗 ⇒
+	 * 每秒一行 [MusicPos]，而听感其实完全正常，纯属刷屏。
+	 */
+	private static int lastPosLogEff = Integer.MIN_VALUE;
 	private static int alignStreak;    // 连续超阈刻数（自动对齐判定用）
 	private static int alignCooldown;  // 对齐后剩余冷却刻数
 	private static int alignRefDelta;  // 窗口起点的偏差（判「是否已经稳住」）
-	private static int seekResidual;   // 上次 seek 的落点残差（音乐 ms）：实测 delta − 目标
+	private static int seekResidual;   // 上次 seek 的**落点误差**（音乐 ms）：实测落点 − 指令目标
 	private static boolean seekPending; // 刚 seek 过，等一次采样去量落点残差
+	/** seek 时下发的目标（音乐 ms）与当刻播放头 —— 用来把「落点误差」和「真实偏差」分开（★ 2026-10-29）。 */
+	private static int seekTargetMs;
+	private static int seekPlayheadMs;
+	/** {@link #effEma} 未初始化哨兵（必须声明在 effEma 之前，否则「非法前向引用」）。 */
+	private static final float EFF_EMA_UNSET = Float.NaN;
+	/** 平滑系数（每刻一次）：0.2 ⇒ 约 5 刻（0.26s）收敛。太小追不上漂移，太大压不住噪声。 */
+	private static final float EFF_EMA_ALPHA = 0.2f;
+	/**
+	 * **有效偏差的指数平滑值**（★ 2026-10-29）。
+	 *
+	 * <p>为什么必须平滑：单个采样点的有效偏差有 ±1 刻（1x 下 52ms）的噪声 ——
+	 * 相位恒为 1.00，但客户端在刻末采样时服务端可能已进入下一刻，`playheadMs` 就会差一整刻。
+	 * 实测同一秒两条日志分别是 `有效=-65ms` 和 `有效=+50ms`，相差 115ms。
+	 * 用这种原值判断「要不要修」，噪声永远压倒真实偏差 → 20 刻内从不连续同向 → **永远不修**。
+	 *
+	 * <p>平滑后噪声（零均值）互相抵消，剩下的才是真实系统偏差，才可能收敛到 10ms 级。
+	 * 初值 {@link #EFF_EMA_UNSET} = 还没采样过。
+	 */
+	private static float effEma = EFF_EMA_UNSET;
 	// 多人用：服务端每刻推送的游戏播放头（单人不用 —— 客户端直接读集成服务端，零延迟）
 	private static int pushedHeadMs = -1;
 	private static long pushedHeadAt;   // 收到时刻（System.currentTimeMillis）
@@ -291,39 +362,90 @@ public class RhythmAxeMusic {
         // ★ 相位补偿 + **居中**：理想对齐是「刻边界处偏差 0」，但那样在刻内音频会一路领先到整刻
         //   （慢放时每刻的真实时间被拉长 ⇒ 听感就是“音乐抢拍”，最大可达一个 mspt）。
         //   把目标整体下移半刻 ⇒ 音频相位误差在 [−Δ/2, +Δ/2] 摆动，最大提前量减半、听感居中。
+        // ★ 2026-10-29：1x 时**不再下移**（见 CENTER_HALF_TICK_AT_1X）——1x 下每刻只有 52ms，
+        //   半刻 26ms 是可听误差，而且会让「完全对齐」也显示成 +26ms，污染诊断。
+        //   慢放（speed<1，或用户显式打开开关）时才居中。
+        float centerBias = (CENTER_HALF_TICK_AT_1X || speed < 0.999f) ? 0.5f : 0f;
         // ★ globalOffsetMs（全局音乐偏移，常数；正 = 音乐延后）也必须加进 center（符号同起播锚点，取负号）：
         //   不加的话自动对齐会在 1 秒内把起播锚点里加的偏移抹掉（对齐目标 = 音频该在的位置，两处必须同一套约定）。
         // ★ mapOffsetMs（谱面音乐偏移，★ 2026-10-28）同一约定、同一符号：这里同样**减**。
-        int center = Math.round((effPhase - 0.5f) * tickSrcMs) + syncOffsetApplied() - globalOffsetMs - mapOffsetMs;
-        // ★ 容差必须 ≥ 半个刻：先前的 20ms 比「期望领先」还小 ⇒ 连 3ms 的正常摆动都被判成偏差，
-        //   每一次修正都把音频往前推一次，越修越提前（日志里 [MusicAlign] 偏差 -3ms 就是它）。
-        int tol = Math.max(ALIGN_TOLERANCE_MS, Math.round(tickSrcMs / 2f) + 10);
+        int center = Math.round((effPhase - centerBias) * tickSrcMs) + syncOffsetApplied() - globalOffsetMs - mapOffsetMs;
+        // ★ 容差：触发修正的门槛。
+        //   ★ 2026-10-29 收紧到 1/4 刻（1x → 17ms；旧值半刻 → 30ms，用户实测「30ms 都听得出来」）。
+        //   敢收紧的前提：有效偏差已做**指数平滑**，单点 ±1 刻的噪声不会再误触发。
+        //   配合下面的「迟滞」（清空计数用更窄的 tol × ratio），既收敛得下去又不会抖动。
+        int tol = Math.max(ALIGN_TOLERANCE_MS, Math.round(tickSrcMs * ALIGN_TOL_TICK_RATIO) + 2);
+        int resetTol = Math.max(4, Math.round(tol * ALIGN_RESET_RATIO));
         int stableDrift = Math.max(ALIGN_STABLE_DRIFT_MS, tickSrcMs + 10);
         int delta = audible - playheadMs;
         // ★ 刚 seek 过 → 先量一次「落点残差」：seek 的实际落点与目标之间总有几十毫秒差，
         //   不扣掉的话它会被当成新偏差 ⇒ 每隔几秒再 seek 一次（听感就是“音乐一直在自动调整”）。
         if (seekPending) {
             seekPending = false;
-            seekResidual = delta - center;
+            // ★★ 2026-10-29 **关键修正**：残差只能测「seek 落点误差」，**不能**把真实偏差也一起吃进来。
+            //   旧写法 `seekResidual = delta − center` 会把「这次没挪完的那部分真实偏差」永久吸收掉：
+            //     真实误差 170ms、单次只挪 20ms ⇒ 残差学成 −150 ⇒ 之后 `有效 = delta − center − 残差 ≈ 0`
+            //     ⇒ 系统以为已对齐、再也不修（实测残差单调累积 −30→−58→−93→−117→−168，而
+            //     [MusicSync] 的真实 delta 从 −571 漂到 −595，听感就是音乐越来越晚）。
+            //   正确口径：seek 之后音乐**应该**在「目标 + 这期间播放头前进的量」处，
+            //   拿它与实测出声位置比较，差值才是纯粹的落点误差（与真实偏差无关）。
+            seekResidual = audible - (seekTargetMs + Math.max(0, playheadMs - seekPlayheadMs));
             alignStreak = 0;
+            effEma = EFF_EMA_UNSET;   // ★ seek 后从新落点重新学（旧平滑值已过时，会立刻误判）
             alignCooldown = Math.max(alignCooldown, ALIGN_COOLDOWN_TICKS);
+            LOGGER.info("[MusicSeek] 落点误差 {}ms（指令目标 {}ms，此刻应到 {}ms，实测出声 {}ms）",
+                    seekResidual, seekTargetMs,
+                    seekTargetMs + Math.max(0, playheadMs - seekPlayheadMs), audible);
             return;
         }
         int eff = delta - center - seekResidual;   // 扣掉落点残差后的真实偏差（音乐 ms）
-        if (eff >= -tol && eff <= tol) {
+        // ★★ 2026-10-29 异常保护：|delta| 远超合理范围（如 /reload 把播放头归零而音乐还在播，
+        //   实测出现过 delta=102981ms）时**不要 seek** —— 一次挪几百 ms 会让音乐彻底乱掉，
+        //   而且那种情形本来就不该由对齐去修（应当重新播放）。直接跳过，等下次正常起播。
+        if (Math.abs(delta) > ALIGN_MAX_DELTA_MS) {
             alignStreak = 0;
+            effEma = EFF_EMA_UNSET;
             return;
         }
-        // 偏差出窗：每秒补一行诊断（正常局静默，一出问题就留证据）
+        // ★★ 2026-10-29 **指数平滑**（关键）：单点采样有 ±1 刻噪声（实测同一秒 -65 / +50），
+        //   直接拿它判断会永远不修（噪声比目标偏差大）。平滑后零均值噪声抵消，剩下的才是真实偏差。
+        if (Float.isNaN(effEma)) {
+            effEma = eff;
+        } else {
+            effEma += EFF_EMA_ALPHA * (eff - effEma);
+        }
+        // 判断与修正都用平滑值（原值只写日志，便于对照）
+        int effSmooth = Math.round(effEma);
+        // ★ 2026-10-29 迟滞：真正放弃攒刻的门槛是 resetTol（比 tol 窄），
+        //   这样偏差在 tol 附近来回摆时仍能攒满 streak、最终被修正掉。
+        //   ★ 判断对象是**平滑值**（effSmooth），不是单点噪声。
+        //   ★★ 日志侧再加一层「粘性」：只有明显离开窗口（< resetTol × 0.5）才重置首行标记，
+        //      否则平滑值在 resetTol 附近来回穿越会让 [MusicPos] 反复打「首行」——实测一局 142 条。
+        if (effSmooth >= -resetTol && effSmooth <= resetTol) {
+            alignStreak = 0;
+            if (Math.abs(effSmooth) < Math.max(2, Math.round(resetTol * 0.5f))) {
+                lastPosLogEff = Integer.MIN_VALUE;   // 真正回到窗口中央：下次出窗时必定打首行
+            }
+            return;
+        }
+        // 偏差出窗：★ 2026-10-29 改成「事件式」日志（不再每秒一行）——
+        //   稳态偏差只要卡在容差外一点点（如 41ms vs 容差 36ms），每一刻都算出窗，
+        //   旧写法就是每秒打一行、听感却完全正常 ⇒ 纯刷屏。
+        //   现在：出窗首行必打；之后只有偏差换了档次（≥ POS_LOG_REBUCKET_MS）或心跳到期才补一行。
         long now = System.currentTimeMillis();
-        if (now - lastPosLogMs >= 1000) {
+        boolean firstOfWindow = lastPosLogEff == Integer.MIN_VALUE;
+        boolean rebucket = !firstOfWindow
+                && Math.abs(effSmooth - lastPosLogEff) >= POS_LOG_REBUCKET_MS;
+        boolean heartbeat = now - lastPosLogMs >= POS_LOG_HEARTBEAT_MS;
+        if (firstOfWindow || rebucket || heartbeat) {
             lastPosLogMs = now;
-            LOGGER.info("[MusicPos] 出声={}ms 播放头={}ms delta={}ms 期望={}ms 残差={}ms 有效={}ms 相位={} 每刻音乐={}ms 变速偏移={}ms 全局偏移={}ms 谱面偏移={}ms speed={}",
-                    audible, playheadMs, delta, center, seekResidual, eff, String.format("%.2f", phase), tickSrcMs, syncOffsetApplied(), globalOffsetMs, mapOffsetMs, speed);
+            lastPosLogEff = effSmooth;
+            LOGGER.info("[MusicPos] 出声={}ms 播放头={}ms delta={}ms 期望={}ms 残差={}ms 有效={}ms 平滑={}ms 相位={} 每刻音乐={}ms 变速偏移={}ms 全局偏移={}ms 谱面偏移={}ms speed={}",
+                    audible, playheadMs, delta, center, seekResidual, eff, effSmooth, String.format("%.2f", phase), tickSrcMs, syncOffsetApplied(), globalOffsetMs, mapOffsetMs, speed);
         }
         if (alignStreak == 0) {
             alignStreak = 1;
-            alignRefDelta = delta;
+            alignRefDelta = effSmooth;
             return;
         }
         alignStreak++;
@@ -331,21 +453,27 @@ public class RhythmAxeMusic {
             return;
         }
         alignStreak = 0;
-        if (Math.abs(delta - alignRefDelta) > stableDrift) {
+        // 稳住判据也用平滑值（原值噪声会直接触发这条而提前放弃）
+        if (Math.abs(effSmooth - alignRefDelta) > stableDrift) {
             return; // 这段窗口内偏差还在大幅变化 → 重新取样，等它稳住再对齐
         }
         // ★ 朝期望位置（delta == center）挪：delta<0（音乐落后）→ 音频往前；delta>0（音乐超前）→ 音频往后。
         //   （曾写成 target = playhead + delta，那等于「挪到它现在的位置」，永远不生效。）
-        int correction = eff;
+        int correction = effSmooth;
         // 单次位移上限按**真实时间**限幅：慢放时源毫秒被拉长，固定音乐毫秒会跳得越来越久
         int maxStep = (int) Math.max(50, Math.round(ALIGN_MAX_STEP_MS * (double) speed));
         int applied = Math.min(Math.abs(correction), maxStep);
         int target = correction > 0 ? audible - applied : audible + applied;
+        // ★ 2026-10-29 诊断：**只记指令值**，不在这里读 audibleMs()。
+        //   原因（已实测确认）：seek 返回瞬间缓冲还没开始播，audibleMs() 读到的是「排队起点」而不是出声点，
+        //   拿它算「过冲」会得出假的 40~100ms；真实落点要用下一次采样的 [MusicSeek] 残差（实测 −5ms，非常准）。
         if (seekAudioTo(target)) {
             seekPending = true;   // 下一次采样去量落点残差，避免反复 seek
+            seekTargetMs = target;          // ★ 记下目标与当刻播放头，供下一次采样算「纯落点误差」
+            seekPlayheadMs = playheadMs;
             alignCooldown = ALIGN_COOLDOWN_TICKS;
-            LOGGER.info("[MusicAlign] 偏差 {}ms（播放头 {}ms / 出声 {}ms / 期望 {}ms）→ 音频已挪到 {}ms",
-                    delta, playheadMs, audible, center, target);
+            LOGGER.info("[MusicAlign] 偏差 {}ms（播放头 {}ms / 出声 {}ms / 期望 {}ms）→ 指令挪到 {}ms（Δ{}，有效偏差 {}ms）",
+                    delta, playheadMs, audible, center, target, target - audible, eff);
         }
     }
 
@@ -700,6 +828,9 @@ public class RhythmAxeMusic {
         alignCooldown = 0;   // 新一次播放：允许自动对齐从头判定
         seekResidual = 0;    // 新一次播放：落点残差重新学
         seekPending = false;
+        lastPosLogEff = Integer.MIN_VALUE;   // ★ 新一次播放：出窗日志从「首行」重新算
+        lastPosLogMs = 0;
+        effEma = EFF_EMA_UNSET;             // ★ 新一次播放：平滑值重新学
         if (prerollWaiting) {
             // ★ 预卷静音：播放头还没走到「延后量」那一刻 ⇒ 先不出声（playing=true 表示「意图在播」，
             //   audibleMs() 因 somethingQueued=false 会返回 -1，对齐自动跳过；prerollTick 到点开声）。
@@ -786,6 +917,9 @@ public class RhythmAxeMusic {
         alignCooldown = 0;
         seekResidual = 0;
         seekPending = false;
+        lastPosLogEff = Integer.MIN_VALUE;   // ★ 预卷结束起声：出窗日志从「首行」重新算
+        lastPosLogMs = 0;
+        effEma = EFF_EMA_UNSET;             // ★ 预卷结束起声：平滑值重新学
         LOGGER.info("[MusicPreroll] 到点起声，内容位置 {}ms", startMs);
     }
 
@@ -1065,6 +1199,7 @@ public class RhythmAxeMusic {
         currentId = null;
         alignStreak = 0;
         alignCooldown = 0;
+        effEma = EFF_EMA_UNSET;
         pendingId = null;
         // 同上：不弹客户端聊天消息（玩家手动 /stopmusic 由服务端 feedbackIfPlayer 反馈）
     }

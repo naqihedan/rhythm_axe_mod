@@ -81,15 +81,17 @@ public class RhythmAxeMod implements ModInitializer {
 			double playheadMs = playhead == Integer.MIN_VALUE ? -1 : MusicTime.headMs(server, playhead);
 			double deltaMs = (playheadMs < 0 || payload.audibleMs() < 0)
 					? Double.NaN : payload.audibleMs() - playheadMs;
-			// 服务端侧粗粒度基线：只在「刚开始播放」（每次一行）或「偏差 > 40ms」时打印（1x 下 1 刻 = 50ms）；
-			// 细粒度判定/修正窗口在客户端 alignTick（[MusicPos]/[MusicAlign]），阈值按刻长与播放速率缩放
-			boolean offSync = Double.isNaN(deltaMs) || Math.abs(deltaMs) > 40;
+			// 服务端侧粗粒度基线：只在「刚开始播放」（每次一行）或「偏差 > 150ms」时打印。
+			// ★ 2026-10-29 阈值 40 → 150：40ms 不到 1x 下的 1 刻（50ms），属于正常摆动；
+			//   稳态偏差停在 40~60ms 时旧阈值会一直触发 ⇒ 每秒一行 [MusicSync] 刷屏，而听感完全正常。
+			//   真正的细粒度诊断在客户端 alignTick（[MusicPos]/[MusicAlign]），阈值按刻长与播放速率缩放。
+			boolean offSync = Double.isNaN(deltaMs) || Math.abs(deltaMs) > 150;
 			if (!justStarted && !offSync) {
 				return;
 			}
 			long now = System.currentTimeMillis();
-			if (now - lastMusicPosLogMs < 1000) {
-				return; // 每秒最多一行
+			if (now - lastMusicPosLogMs < 5000) {
+				return; // 每 5 秒最多一行（异常时也别刷屏；客户端日志才是主战场）
 			}
 			lastMusicPosLogMs = now;
 			double mspt = server.tickRateManager().millisecondsPerTick();
